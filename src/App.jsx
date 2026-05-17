@@ -12,11 +12,31 @@ const sSet = async (k, v) => { try { localStorage.setItem(k, JSON.stringify(v));
 const sDel = async k => { try { localStorage.removeItem(k); } catch {} };
 
 // ─── Data helpers ─────────────────────────────────────────────────────────────
+const ROUND_NAMES = { 2: ["Final"], 4: ["Semifinals", "Final"], 8: ["Quarterfinals", "Semifinals", "Final"] };
+
+const freshRound = (name = "Round 1") => ({
+  id: uid(), name,
+  miniGames: ["trivia"],
+  trivia: { topicCount: 2, questionsPerTopic: 5, questionTime: 25, topics: [] },
+  associations: { puzzles: [] }
+});
+
+const freshShowRounds = (playerCount) =>
+  (ROUND_NAMES[playerCount] || ["Round 1"]).map(name => freshRound(name));
+
 const freshShow = () => ({
   id: uid(), name: "New Show", createdAt: Date.now(), updatedAt: Date.now(),
-  miniGames: ["trivia"],
-  trivia: { topicCount: 2, questionsPerTopic: 5, questionTime: 25, topics: [] }
+  playerCount: 4,
+  rounds: freshShowRounds(4)
 });
+
+// Normalise old shows (top-level trivia/associations, no rounds, no playerCount)
+const normaliseShow = show => {
+  const rounds = show.rounds?.length
+    ? show.rounds.map(r => ({ miniGames: show.miniGames || ["trivia"], ...r }))
+    : [{ id: uid(), name: "Round 1", miniGames: show.miniGames || ["trivia"], trivia: show.trivia || freshRound().trivia, associations: show.associations || freshRound().associations }];
+  return { playerCount: 4, ...show, rounds };
+};
 
 function syncTopics(tr) {
   let ts = [...(tr.topics || [])];
@@ -29,11 +49,30 @@ function syncTopics(tr) {
   return { ...tr, topics: ts };
 }
 
-function buildBoard(tr) {
-  return syncTopics(tr).topics.map(t => ({
-    name: t.name || "—",
-    qs: [...t.questions].sort((a, b) => a.points - b.points).map(q => ({ id: q.id, text: q.text, points: q.points, done: false }))
-  }));
+function buildBoard(tr, assoc, miniGames) {
+  const safeTr = tr || { topicCount: 0, questionsPerTopic: 0, topics: [] };
+  const safeAssoc = assoc || { puzzles: [] };
+  const triviaColumns = (miniGames || []).includes("trivia")
+    ? syncTopics(safeTr).topics.map(t => ({
+        name: t.name || "—", type: "trivia",
+        qs: [...t.questions].sort((a, b) => a.points - b.points).map(q => ({ id: q.id, text: q.text, points: q.points, done: false }))
+      }))
+    : [];
+  const puzzles = (safeAssoc?.puzzles || []).filter(p => p.answer && p.branches?.length > 0);
+  if (!puzzles.length) return triviaColumns;
+  const assocColumn = {
+    name: "Associations", type: "assoc",
+    qs: puzzles.map(p => ({
+      id: p.id, type: "assoc",
+      answer: p.answer,
+      branches: p.branches.map(b => (b.words || []).filter(w => w.trim())),
+      points: p.points || p.basePoints || 500,
+      revealedCells: [],
+      centerRevealed: false,
+      done: false
+    }))
+  };
+  return [...triviaColumns, assocColumn];
 }
 
 function buildBracket(players) {
@@ -198,6 +237,19 @@ const CSS = `
   .mini-game-btn { display: flex; align-items: center; gap: 8px; padding: 10px 16px; border-radius: var(--radius); border: 1.5px solid var(--border); background: var(--surf2); font-size: 13px; font-weight: 700; transition: all .15s; cursor: pointer; }
   .mini-game-btn.on { border-color: var(--gold); background: rgba(245,197,24,.08); color: var(--gold); }
   .mini-game-btn.disabled { opacity: .35; cursor: not-allowed; }
+  .board-cell.assoc-cell { background: #1a0850; border-color: #5020a0; }
+  .board-cell.assoc-cell.avail:hover { border-color: #a060ff; background: #2a1070; }
+
+  /* Associations panel */
+  .assoc-display { background: #1a0640; border: 1px solid #5020a0; border-radius: var(--radius); padding: 14px; }
+  .assoc-meta { font-size: 10px; font-weight: 700; color: #9060d0; text-transform: uppercase; letter-spacing: .6px; margin-bottom: 8px; display: flex; align-items: center; justify-content: space-between; }
+  .assoc-answer { background: rgba(192,144,255,.1); border: 1.5px solid rgba(192,144,255,.3); color: #c090ff; border-radius: 8px; padding: 7px 14px; font-weight: 900; font-size: 18px; font-family: 'Barlow Condensed',sans-serif; text-align: center; margin-bottom: 12px; }
+  .assoc-branch { display: flex; align-items: center; gap: 4px; flex-wrap: wrap; margin-bottom: 5px; }
+  .assoc-word { padding: 3px 8px; border-radius: 5px; font-size: 11px; font-weight: 700; transition: all .3s; }
+  .assoc-word.revealed { background: rgba(192,144,255,.18); border: 1px solid rgba(192,144,255,.35); color: #c090ff; }
+  .assoc-word.hidden { background: var(--surf3); border: 1px solid var(--border); color: var(--dim); }
+  .assoc-arrow { color: var(--dim); font-size: 11px; flex-shrink: 0; }
+
   .hr { border: none; border-top: 1px solid var(--border); }
 `;
 
@@ -222,36 +274,54 @@ export default function App() {
   const [view, setView] = useState("login");
   const [shows, setShows] = useState([]);
   const [editing, setEditing] = useState(null);
-  const [game, setGame] = useState(null);
+  const [games, setGames] = useState({});      // { [showId]: gameState }
+  const [viewingId, setViewingId] = useState(null); // which show's game we're viewing
 
   useEffect(() => {
     const style = document.createElement("style");
     style.textContent = CSS;
     document.head.appendChild(style);
     sGet("jshows").then(d => { if (d) setShows(d); });
-    sGet("jgame").then(d => { if (d) setGame(d); });
+    // Support both old single-game and new multi-game storage
+    sGet("jgames").then(d => {
+      if (d) { setGames(d); return; }
+      // Migrate old single jgame
+      sGet("jgame").then(old => { if (old) setGames({ [old.showId]: old }); });
+    });
   }, []);
 
   const saveShows = async s => { setShows(s); await sSet("jshows", s); };
-  const saveGame = async g => { setGame(g); if (g) await sSet("jgame", g); else await sDel("jgame"); };
+
+  const updateGame = async (showId, g) => {
+    const updated = g
+      ? { ...games, [showId]: g }
+      : Object.fromEntries(Object.entries(games).filter(([k]) => k !== showId));
+    setGames(updated);
+    await sSet("jgames", updated);
+  };
 
   if (view === "login") return <Login onLogin={() => setView("dash")} />;
+
   if (view === "dash") return (
-    <Dashboard shows={shows} game={game}
+    <Dashboard shows={shows} games={games}
       onNew={() => { setEditing(freshShow()); setView("edit"); }}
-      onEdit={s => { setEditing(s); setView("edit"); }}
-      onDelete={async id => saveShows(shows.filter(s => s.id !== id))}
-      onPlay={s => {
-        if (game && game.showId !== s.id) {
-          if (!confirm("Start a new game? Current game will be lost.")) return;
-        }
-        if (game?.showId === s.id) { setView("game"); return; }
-        setEditing(s); setView("psetup");
+      onEdit={s => { setEditing(normaliseShow(s)); setView("edit"); }}
+      onDelete={async id => {
+        // Direct manipulation — no closures that could be stale
+        const newShows = shows.filter(s => s.id !== id);
+        setShows(newShows);
+        sSet("jshows", newShows);
+        // Remove game for this show
+        const newGames = Object.fromEntries(Object.entries(games).filter(([k]) => k !== id));
+        setGames(newGames);
+        sSet("jgames", newGames);
       }}
-      onResume={() => setView("game")}
+      onPlay={s => { setEditing(s); setView("psetup"); }}
+      onResume={showId => { setViewingId(showId); setView("game"); }}
       onLogout={() => setView("login")}
     />
   );
+
   if (view === "edit") return (
     <ShowEditor show={editing} onChange={setEditing}
       onSave={async () => {
@@ -262,16 +332,31 @@ export default function App() {
       onCancel={() => setView("dash")}
     />
   );
+
   if (view === "psetup") return (
     <PlaySetup show={editing}
       onStart={async (players, bracket) => {
-        const g = { showId: editing.id, showName: editing.name, trivia: syncTopics(editing.trivia), players, bracket, matches: {}, activeMatchId: null, subView: "bracket" };
-        await saveGame(g); setView("game");
+        const g = {
+          showId: editing.id, showName: editing.name,
+          rounds: (editing.rounds || []).map(r => ({ ...r, trivia: syncTopics(r.trivia || freshRound().trivia), associations: r.associations || { puzzles: [] } })),
+          players, bracket, matches: {}, activeMatchId: null, subView: "bracket"
+        };
+        await updateGame(editing.id, g);
+        setViewingId(editing.id);
+        setView("game");
       }}
       onCancel={() => setView("dash")}
     />
   );
-  if (view === "game" && game) return <GameView game={game} onUpdate={saveGame} onBack={() => setView("dash")} />;
+
+  if (view === "game" && viewingId && games[viewingId]) return (
+    <GameView
+      game={games[viewingId]}
+      onUpdate={g => updateGame(viewingId, g)}
+      onBack={() => setView("dash")}
+    />
+  );
+
   return <div style={{ display: "flex", alignItems: "center", justifyContent: "center", height: "100vh", color: "var(--muted)" }}>Loading…</div>;
 }
 
@@ -299,7 +384,7 @@ function Login({ onLogin }) {
 }
 
 // ─── Dashboard ────────────────────────────────────────────────────────────────
-function Dashboard({ shows, game, onNew, onEdit, onDelete, onPlay, onResume, onLogout }) {
+function Dashboard({ shows, games, onNew, onEdit, onDelete, onPlay, onResume, onLogout }) {
   return (
     <div className="app">
       <div className="header">
@@ -307,7 +392,6 @@ function Dashboard({ shows, game, onNew, onEdit, onDelete, onPlay, onResume, onL
           <div style={{ fontFamily: "'Barlow Condensed',sans-serif", fontWeight: 900, fontSize: 18, color: "var(--gold)" }}>JEOPARDY HOST</div>
           <div className="muted" style={{ fontSize: 11 }}>Show Manager</div>
         </div>
-        {game && <Btn variant="green" size="sm" onClick={onResume}>▶ Resume Game</Btn>}
         <Btn size="sm" onClick={onNew}>+ New Show</Btn>
         <Btn variant="ghost" size="sm" onClick={onLogout}>Logout</Btn>
       </div>
@@ -324,25 +408,30 @@ function Dashboard({ shows, game, onNew, onEdit, onDelete, onPlay, onResume, onL
             {shows.map(s => {
               const filledTopics = (s.trivia?.topics || []).filter(t => t.name).length;
               const totalQ = (s.trivia?.topics || []).reduce((a, t) => a + t.questions.filter(q => q.text).length, 0);
-              const isActive = game?.showId === s.id;
+              const assocRounds = (s.associations?.puzzles || []).filter(p => p.answer).length;
+              const hasGame = !!games[s.id];
               return (
-                <div key={s.id} className={`card show-row fade`} style={{ borderColor: isActive ? "rgba(245,197,24,.4)" : "" }}>
+                <div key={s.id} className="card show-row fade" style={{ borderColor: hasGame ? "rgba(245,197,24,.4)" : "" }}>
                   <div className="flex1" style={{ minWidth: 0 }}>
                     <div className="row gap2" style={{ marginBottom: 4 }}>
                       <span style={{ fontWeight: 700, fontSize: 15, color: "var(--gold)" }}>{s.name}</span>
-                      {isActive && <span className="tag tag-gold">● Active</span>}
+                      {hasGame && <span className="tag tag-gold">● Active</span>}
                     </div>
                     <div className="row gap3 muted" style={{ fontSize: 11, flexWrap: "wrap" }}>
-                      <span>📚 {filledTopics}/{s.trivia?.topicCount || 0} topics</span>
-                      <span>❓ {totalQ} questions</span>
+                      {(s.miniGames || []).includes("trivia") && <span>📚 {filledTopics}/{s.trivia?.topicCount || 0} topics · ❓ {totalQ} q</span>}
+                      {(s.miniGames || []).includes("associations") && <span>🔗 {assocRounds} rounds</span>}
                       <span>🕐 {new Date(s.updatedAt).toLocaleDateString()}</span>
                       {(s.miniGames || []).map(g => <span key={g} className="tag tag-gold">{g}</span>)}
                     </div>
                   </div>
                   <div className="row gap2">
                     <Btn variant="ghost" size="sm" onClick={() => onEdit(s)}>✏️ Edit</Btn>
-                    <Btn variant="ghost" size="sm" style={{ color: "#f87171" }} onClick={() => { if (confirm(`Delete "${s.name}"?`)) onDelete(s.id); }}>🗑</Btn>
-                    <Btn size="sm" onClick={() => onPlay(s)}>▶ Play</Btn>
+                    <Btn variant="ghost" size="sm" style={{ color: "#f87171" }}
+                      onClick={() => onDelete(s.id)}>🗑</Btn>
+                    {hasGame && (
+                      <Btn variant="green" size="sm" onClick={() => onResume(s.id)}>→ Resume</Btn>
+                    )}
+                    <Btn size="sm" onClick={() => onPlay(s)}>▶ New Game</Btn>
                   </div>
                 </div>
               );
@@ -356,17 +445,41 @@ function Dashboard({ shows, game, onNew, onEdit, onDelete, onPlay, onResume, onL
 
 // ─── Show Editor ──────────────────────────────────────────────────────────────
 function ShowEditor({ show, onChange, onSave, onCancel }) {
-  const upd = p => onChange({ ...show, ...p });
-  const GAMES = [
-    { id: "trivia",       label: "Trivia",            icon: "❓", ok: true  },
-    { id: "maths",        label: "Maths",              icon: "➕", ok: false },
-    { id: "associations", label: "Associations",       icon: "🔗", ok: false },
-    { id: "pairs",        label: "Pairs Connection",   icon: "🃏", ok: false },
+  const [activeRound, setActiveRound] = useState(0);
+
+  const AVAILABLE_GAMES = [
+    { id: "trivia",       label: "Trivia",          icon: "❓", ok: true  },
+    { id: "maths",        label: "Maths",            icon: "➕", ok: false },
+    { id: "associations", label: "Associations",     icon: "🔗", ok: true  },
+    { id: "pairs",        label: "Pairs Connection", icon: "🃏", ok: false },
   ];
-  const toggle = id => {
-    const mg = show.miniGames.includes(id) ? show.miniGames.filter(g => g !== id) : [...show.miniGames, id];
-    upd({ miniGames: mg });
+
+  const rounds = show.rounds || [];
+  const ai = Math.min(activeRound, Math.max(0, rounds.length - 1));
+  const cur = rounds[ai];
+
+  const setPlayerCount = n => {
+    const names = ROUND_NAMES[n] || ["Round 1"];
+    const newRounds = names.map((name, i) => ({
+      id: rounds[i]?.id || uid(),
+      name,
+      miniGames: rounds[i]?.miniGames || ["trivia"],
+      trivia: rounds[i]?.trivia || freshRound().trivia,
+      associations: rounds[i]?.associations || freshRound().associations,
+    }));
+    onChange({ ...show, playerCount: n, rounds: newRounds });
+    setActiveRound(0);
   };
+
+  const updRound = (i, patch) => onChange({ ...show, rounds: rounds.map((r, ri) => ri === i ? { ...r, ...patch } : r) });
+
+  const toggleRoundGame = (i, gameId) => {
+    const mg = (rounds[i].miniGames || []).includes(gameId)
+      ? rounds[i].miniGames.filter(g => g !== gameId)
+      : [...(rounds[i].miniGames || []), gameId];
+    updRound(i, { miniGames: mg });
+  };
+
   return (
     <div className="app">
       <div className="header">
@@ -377,30 +490,84 @@ function ShowEditor({ show, onChange, onSave, onCancel }) {
         <Btn onClick={onSave}>💾 Save Show</Btn>
       </div>
       <div className="page stack">
+
+        {/* 1. Show name */}
         <Card>
           <SectionLabel>Show Name</SectionLabel>
-          <input type="text" value={show.name} onChange={e => upd({ name: e.target.value })} placeholder="Enter show name…" style={{ fontWeight: 700, fontSize: 16 }} />
+          <input type="text" value={show.name} onChange={e => onChange({ ...show, name: e.target.value })}
+            placeholder="Enter show name…" style={{ fontWeight: 700, fontSize: 16 }} />
         </Card>
+
+        {/* 2. Player count — determines bracket structure & rounds */}
         <Card>
-          <SectionLabel>Mini-Games</SectionLabel>
-          <div className="row gap2 wrap">
-            {GAMES.map(g => (
-              <button key={g.id} onClick={() => g.ok && toggle(g.id)}
-                className={`mini-game-btn${show.miniGames.includes(g.id) ? " on" : ""}${!g.ok ? " disabled" : ""}`}>
-                {g.icon} {g.label}
-                {!g.ok && <span style={{ fontSize: 10, color: "var(--dim)" }}>soon</span>}
-                {g.ok && show.miniGames.includes(g.id) && <span style={{ color: "#4ade80" }}>✓</span>}
+          <SectionLabel>Players — determines bracket & number of rounds</SectionLabel>
+          <div className="row gap2">
+            {[2, 4, 8].map(n => (
+              <button key={n} onClick={() => setPlayerCount(n)}
+                className={`count-btn${show.playerCount === n ? " on" : ""}`}>
+                {n}
               </button>
             ))}
           </div>
+          {show.playerCount && (
+            <div className="muted" style={{ fontSize: 11, marginTop: 10 }}>
+              {show.playerCount} players → {(ROUND_NAMES[show.playerCount] || []).length} bracket round(s):&nbsp;
+              <strong style={{ color: "var(--text)" }}>{(ROUND_NAMES[show.playerCount] || []).join(" → ")}</strong>
+            </div>
+          )}
         </Card>
-        {show.miniGames.includes("trivia") && (
-          <TriviaEditor trivia={show.trivia} onChange={t => onChange({ ...show, trivia: t })} />
+
+        {/* 3. Round tabs + per-round mini-games & questions */}
+        {rounds.length > 0 ? (<>
+          <div className="row gap2 wrap">
+            {rounds.map((r, i) => (
+              <button key={r.id} onClick={() => setActiveRound(i)}
+                className={`topic-tab${i === ai ? " on" : ""}`}>
+                {r.name || `Round ${i + 1}`}
+              </button>
+            ))}
+          </div>
+
+          {cur && (<>
+            {/* Per-round mini-games */}
+            <Card>
+              <SectionLabel>{cur.name} — Mini-Games</SectionLabel>
+              <div className="row gap2 wrap">
+                {AVAILABLE_GAMES.map(g => (
+                  <button key={g.id} onClick={() => g.ok && toggleRoundGame(ai, g.id)}
+                    className={`mini-game-btn${(cur.miniGames||[]).includes(g.id)?" on":""}${!g.ok?" disabled":""}`}>
+                    {g.icon} {g.label}
+                    {!g.ok && <span style={{ fontSize: 10, color: "var(--dim)" }}>soon</span>}
+                    {g.ok && (cur.miniGames||[]).includes(g.id) && <span style={{ color: "#4ade80" }}>✓</span>}
+                  </button>
+                ))}
+              </div>
+            </Card>
+
+            {(cur.miniGames || []).includes("trivia") && (
+              <TriviaEditor
+                trivia={cur.trivia || freshRound().trivia}
+                onChange={t => updRound(ai, { trivia: t })}
+              />
+            )}
+            {(cur.miniGames || []).includes("associations") && (
+              <AssociationsEditor
+                assoc={cur.associations || { puzzles: [] }}
+                onChange={a => updRound(ai, { associations: a })}
+              />
+            )}
+          </>)}
+        </>) : (
+          <div className="muted" style={{ textAlign: "center", padding: 32, fontSize: 13 }}>
+            Select number of players above to set up rounds.
+          </div>
         )}
+
       </div>
     </div>
   );
 }
+
 
 // ─── Trivia Editor ────────────────────────────────────────────────────────────
 function TriviaEditor({ trivia, onChange }) {
@@ -478,10 +645,133 @@ function TriviaEditor({ trivia, onChange }) {
   );
 }
 
+// ─── Associations Editor ──────────────────────────────────────────────────────
+function AssociationsEditor({ assoc, onChange }) {
+  const [ai, setAi] = useState(0);
+  const puzzles = assoc.puzzles || [];
+
+  const CORNER_LABELS = ["Top-Left", "Top-Right", "Bottom-Left", "Bottom-Right"];
+
+  const freshPuzzle = () => ({
+    id: uid(), answer: "", points: 500, wordsPerBranch: 5,
+    branches: [
+      { id: uid(), words: Array(5).fill("") },
+      { id: uid(), words: Array(5).fill("") },
+      { id: uid(), words: Array(5).fill("") },
+      { id: uid(), words: Array(5).fill("") },
+    ]
+  });
+
+  const addPuzzle = () => { onChange({ ...assoc, puzzles: [...puzzles, freshPuzzle()] }); setAi(puzzles.length); };
+  const removePuzzle = id => { onChange({ ...assoc, puzzles: puzzles.filter(p => p.id !== id) }); setAi(0); };
+
+  const updPuzzle = (pid, patch) => onChange({ ...assoc, puzzles: puzzles.map(p => p.id !== pid ? p : { ...p, ...patch }) });
+
+  // When wordsPerBranch changes, resize all branches
+  const setWordsPerBranch = (pid, n) => {
+    const p = puzzles.find(x => x.id === pid);
+    const branches = p.branches.map(b => {
+      const words = [...b.words];
+      while (words.length < n) words.push("");
+      return { ...b, words: words.slice(0, n) };
+    });
+    updPuzzle(pid, { wordsPerBranch: n, branches });
+  };
+
+  const setWord = (pid, bi, wi, val) => {
+    const p = puzzles.find(x => x.id === pid);
+    updPuzzle(pid, { branches: p.branches.map((b, i) => i !== bi ? b : { ...b, words: b.words.map((w, j) => j === wi ? val : w) }) });
+  };
+
+  const idx = Math.min(ai, Math.max(0, puzzles.length - 1));
+  const cur = puzzles[idx];
+
+  return (
+    <Card>
+      <div className="row gap2" style={{ marginBottom: 14, alignItems: "flex-start" }}>
+        <div style={{ flex: 1 }}>
+          <SectionLabel style={{ margin: 0 }}>Associations — Rounds</SectionLabel>
+          <div className="muted" style={{ fontSize: 11, marginTop: 3 }}>Each round is one puzzle. Admin reveals word cells one by one during play.</div>
+        </div>
+        <Btn size="sm" onClick={addPuzzle}>+ Add Round</Btn>
+      </div>
+
+      {puzzles.length === 0 && (
+        <div className="muted" style={{ textAlign: "center", padding: "20px 0", fontSize: 13 }}>
+          No rounds yet — click "Add Round" to create the first puzzle.
+        </div>
+      )}
+
+      {puzzles.length > 0 && <>
+        {/* Round tabs */}
+        <div className="row gap2 wrap" style={{ marginBottom: 14 }}>
+          {puzzles.map((p, i) => (
+            <button key={p.id} onClick={() => setAi(i)} className={`topic-tab${i === idx ? " on" : ""}`}>
+              Round {i + 1}{p.answer ? `: ${p.answer}` : ""}
+            </button>
+          ))}
+        </div>
+
+        {cur && (
+          <div className="q-editor fade">
+            {/* Answer + Words per corner */}
+            <div className="row gap3 wrap" style={{ marginBottom: 16 }}>
+              <div style={{ flex: 1, minWidth: 180 }}>
+                <label style={{ fontSize: 11, color: "var(--muted)", fontWeight: 600, display: "block", marginBottom: 5 }}>Answer (hidden from players)</label>
+                <input type="text" value={cur.answer} onChange={e => updPuzzle(cur.id, { answer: e.target.value })}
+                  placeholder="e.g. Barrier" style={{ fontWeight: 700 }} />
+              </div>
+              <div>
+                <label style={{ fontSize: 11, color: "var(--muted)", fontWeight: 600, display: "block", marginBottom: 5 }}>Words per corner</label>
+                <select value={cur.wordsPerBranch || 5} onChange={e => setWordsPerBranch(cur.id, +e.target.value)}
+                  style={{ width: "auto" }}>
+                  {[1,2,3,4,5,6,7].map(n => <option key={n} value={n}>{n}</option>)}
+                </select>
+              </div>
+            </div>
+
+            {/* 4 corners in a 2x2 grid */}
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
+              {cur.branches.map((branch, bi) => (
+                <div key={branch.id} style={{ background: "var(--surf3)", borderRadius: 8, padding: 10 }}>
+                  <div style={{ fontSize: 11, color: "#9060d0", fontWeight: 700, marginBottom: 8 }}>
+                    {CORNER_LABELS[bi]} corner
+                    <span className="muted" style={{ fontWeight: 400, marginLeft: 6 }}>(outer → inner)</span>
+                  </div>
+                  <div className="stack" style={{ gap: 5 }}>
+                    {branch.words.map((w, wi) => (
+                      <div key={wi} className="row gap2">
+                        <span className="muted" style={{ fontSize: 10, minWidth: 14 }}>{wi + 1}.</span>
+                        <input type="text" value={w}
+                          onChange={e => setWord(cur.id, bi, wi, e.target.value)}
+                          placeholder={wi === branch.words.length - 1 ? "closest to answer" : `word ${wi + 1}`}
+                          style={{ fontSize: 12, padding: "4px 8px" }} />
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              ))}
+            </div>
+
+            <div className="row" style={{ marginTop: 12, justifyContent: "space-between", alignItems: "center" }}>
+              <div className="muted" style={{ fontSize: 11 }}>Round {idx + 1} of {puzzles.length}</div>
+              <Btn variant="ghost" size="sm" style={{ color: "#f87171" }}
+                onClick={() => removePuzzle(cur.id)}>
+                🗑 Delete Round
+              </Btn>
+            </div>
+          </div>
+        )}
+      </>}
+    </Card>
+  );
+}
+
 // ─── Play Setup ───────────────────────────────────────────────────────────────
 function PlaySetup({ show, onStart, onCancel }) {
-  const [count, setCount] = useState(4);
-  const [players, setPlayers] = useState(() => Array.from({ length: 4 }, (_, i) => ({ id: uid(), name: "", color: PLAYER_COLORS[i] })));
+  const defaultCount = show.playerCount || 4;
+  const [count, setCount] = useState(defaultCount);
+  const [players, setPlayers] = useState(() => Array.from({ length: defaultCount }, (_, i) => ({ id: uid(), name: "", color: PLAYER_COLORS[i] })));
   const [mode, setMode] = useState("random");
   const [manualOrder, setManualOrder] = useState(null);
 
@@ -612,7 +902,13 @@ function BracketScreen({ game, onUpdate, onBack }) {
 
   const startMatch = async matchId => {
     const m = bracket.flat().find(x => x.id === matchId); if (!m) return;
-    const md = { p1: m.p1, p2: m.p2, scores: { [m.p1]: 0, [m.p2]: 0 }, board: buildBoard(game.trivia), turn: m.p1, phase: "picking", activeQ: null };
+    // Find which bracket round this match is in
+    let ri = 0;
+    bracket.forEach((r, r2) => r.forEach(mm => { if (mm.id === matchId) ri = r2; }));
+    // Pick question round (use last round if bracket has more rounds than question rounds)
+    const rounds = game.rounds || [];
+    const roundData = rounds[Math.min(ri, Math.max(rounds.length - 1, 0))] || { miniGames: ["trivia"], trivia: { topicCount: 0, questionsPerTopic: 0, topics: [] }, associations: { puzzles: [] } };
+    const md = { p1: m.p1, p2: m.p2, scores: { [m.p1]: 0, [m.p2]: 0 }, board: buildBoard(roundData.trivia, roundData.associations, roundData.miniGames || ["trivia"]), turn: m.p1, phase: "picking", activeQ: null };
     await onUpdate({ ...game, activeMatchId: matchId, subView: "match", matches: { ...matches, [matchId]: md } });
   };
 
@@ -622,7 +918,7 @@ function BracketScreen({ game, onUpdate, onBack }) {
         <Btn variant="ghost" size="sm" onClick={onBack}>← Shows</Btn>
         <div style={{ flex: 1, fontFamily: "'Barlow Condensed',sans-serif", fontWeight: 900, fontSize: 17, color: "var(--gold)" }}>🏆 {game.showName}</div>
         {champion && <span className="tag tag-gold" style={{ fontSize: 13 }}>🏆 Champion: {champion.name}</span>}
-        <Btn variant="ghost" size="sm" style={{ color: "#f87171" }} onClick={async () => { if (confirm("End this game?")) { await onUpdate(null); onBack(); } }}>End Game</Btn>
+        <Btn variant="ghost" size="sm" style={{ color: "#f87171" }} onClick={async () => { await onUpdate(null); onBack(); }}>End Game</Btn>
       </div>
       <div className="page">
         <div className="bracket-wrap">
@@ -678,13 +974,24 @@ function MatchScreen({ game, onUpdate }) {
   const gp = id => game.players.find(p => p.id === id);
   const turnP = gp(turn), otherP = gp(turn === p1 ? p2 : p1);
   const aq = activeQ ? board[activeQ.ti].qs[activeQ.qi] : null;
-  const questionTime = game.trivia.questionTime || 25;
+  // Find questionTime from the round that was used for this match
+  const questionTime = (() => {
+    const rounds = game.rounds || [];
+    for (const r of rounds) {
+      if (r.trivia?.questionTime) return r.trivia.questionTime;
+    }
+    return 25;
+  })();
 
   const [timerLeft, setTimerLeft] = useState(null);
   const [timerRunning, setTimerRunning] = useState(false);
+  const [assocPoints, setAssocPoints] = useState(100);
 
-  // Reset timer whenever a new question is selected or steal phase begins
-  useEffect(() => { setTimerLeft(null); setTimerRunning(false); }, [activeQ]);
+  // Reset timer and assocPoints whenever a new question is selected
+  useEffect(() => {
+    setTimerLeft(null); setTimerRunning(false);
+    if (aq?.type === "assoc") setAssocPoints(100);
+  }, [activeQ]);
   useEffect(() => { if (phase === "steal") { setTimerLeft(null); setTimerRunning(false); } }, [phase]);
 
   // Countdown tick
@@ -699,7 +1006,50 @@ function MatchScreen({ game, onUpdate }) {
 
   const startTimer = () => { setTimerLeft(questionTime); setTimerRunning(true); };
 
+  // Switch active turn to any player — works at any time
+  const switchTurn = async pid => {
+    await upd({ turn: pid });
+  };
+
   const upd = async patch => await onUpdate({ ...game, matches: { ...game.matches, [game.activeMatchId]: { ...md, ...patch } } });
+
+  // For Associations: reveal individual word cell
+  const revealCell = async (bi, wi) => {
+    if (!aq || aq.type !== "assoc") return;
+    const key = `${bi}-${wi}`;
+    if ((aq.revealedCells || []).includes(key)) return;
+    const newBoard = board.map((t, ti) => ({
+      ...t, qs: t.qs.map((q, qi) =>
+        ti === activeQ.ti && qi === activeQ.qi
+          ? { ...q, revealedCells: [...(q.revealedCells || []), key] }
+          : q
+      )
+    }));
+    await upd({ board: newBoard });
+  };
+
+  // For Associations: reveal the center answer
+  const revealCenter = async () => {
+    if (!aq || aq.type !== "assoc" || aq.centerRevealed) return;
+    const newBoard = board.map((t, ti) => ({
+      ...t, qs: t.qs.map((q, qi) =>
+        ti === activeQ.ti && qi === activeQ.qi
+          ? { ...q, centerRevealed: true }
+          : q
+      )
+    }));
+    await upd({ board: newBoard });
+  };
+
+  // For Trivia only: reveal layer (kept for backward compat)
+  const revealLayer = async () => {
+    if (!aq || aq.type !== "assoc") return;
+    const newRL = (aq.revealedLayers || 0) + 1;
+    const ppL = Math.floor(aq.points / (aq.maxLayers + 1));
+    const newPts = Math.max(ppL, aq.points - newRL * ppL);
+    const newBoard = board.map((t, ti) => ({ ...t, qs: t.qs.map((q, qi) => ti === activeQ.ti && qi === activeQ.qi ? { ...q, revealedLayers: newRL, points: newPts } : q) }));
+    await upd({ board: newBoard });
+  };
 
   const markBoard = () => board.map((t, ti) => ({
     ...t, qs: t.qs.map((q, qi) => ti === activeQ.ti && qi === activeQ.qi ? { ...q, done: true } : q)
@@ -716,7 +1066,8 @@ function MatchScreen({ game, onUpdate }) {
 
   const correct = async () => {
     if (!aq) return;
-    const nb = markBoard(); const ns = { ...scores, [turn]: (scores[turn] || 0) + aq.points }; const nxt = turn === p1 ? p2 : p1;
+    const pts = aq.type === "assoc" ? assocPoints : aq.points;
+    const nb = markBoard(); const ns = { ...scores, [turn]: (scores[turn] || 0) + pts }; const nxt = turn === p1 ? p2 : p1;
     if (allDone(nb)) await endMatch(ns, nb); else await upd({ phase: "picking", activeQ: null, board: nb, scores: ns, turn: nxt });
   };
   const wrong = async () => upd({ phase: "steal_offer" });
@@ -727,7 +1078,8 @@ function MatchScreen({ game, onUpdate }) {
   };
   const stealResult = async ok => {
     if (!aq) return;
-    const half = Math.floor(aq.points / 2); const sid = turn === p1 ? p2 : p1;
+    const pts = aq.type === "assoc" ? assocPoints : aq.points;
+    const half = Math.floor(pts / 2); const sid = turn === p1 ? p2 : p1;
     const nb = markBoard(); const ns = { ...scores, [sid]: (scores[sid] || 0) + (ok ? half : -half) };
     if (allDone(nb)) await endMatch(ns, nb); else await upd({ phase: "picking", activeQ: null, board: nb, scores: ns, turn: sid });
   };
@@ -749,12 +1101,22 @@ function MatchScreen({ game, onUpdate }) {
         <span style={{ flex: 1, fontFamily: "'Barlow Condensed',sans-serif", fontWeight: 900, fontSize: 15, color: "var(--gold)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{game.showName}</span>
         <div className="row gap2">
           {[p1, p2].map(pid => {
-            const p = gp(pid); const active = isTurn(pid) || isSteal(pid);
+            const p = gp(pid);
+            const isActive = isTurn(pid) || isSteal(pid);
+            const isOther = pid !== turn;
             return (
-              <div key={pid} className="score-pill" style={{ background: `${p?.color}16`, outline: active ? `1.5px solid ${p?.color}` : "1.5px solid transparent" }}>
+              <div key={pid} className="score-pill"
+                onClick={() => isOther && switchTurn(pid)}
+                style={{
+                  background: `${p?.color}16`,
+                  outline: isActive ? `1.5px solid ${p?.color}` : "1.5px solid transparent",
+                  cursor: isOther ? "pointer" : "default",
+                  transition: "outline .15s",
+                }}>
                 <div className="score-dot" style={{ background: p?.color }} />
                 <span className="score-name" style={{ color: p?.color }}>{p?.name}</span>
                 <span className="score-val">{scores[pid] ?? 0}</span>
+                {isOther && <span style={{ fontSize: 9, color: p?.color, opacity: .6 }}>↑</span>}
               </div>
             );
           })}
@@ -766,36 +1128,59 @@ function MatchScreen({ game, onUpdate }) {
       </div>
 
       <div className="game-body">
-        <div className="board-area">
-          <div className="board-wrap">
-            <div className="board">
-              {board.map((topic, ti) => (
-                <div key={ti} className="board-col">
-                  <div className="board-head">{topic.name || `Topic ${ti + 1}`}</div>
-                  {topic.qs.map((q, qi) => {
-                    const canClick = !q.done && phase === "picking";
-                    return (
-                      <div key={q.id}
-                        className={`board-cell${q.done ? " used" : canClick ? " avail" : " locked"}`}
-                        onClick={() => canClick && upd({ phase: "answering", activeQ: { ti, qi } })}>
-                        {!q.done && q.points}
+        {aq?.type === "assoc" ? (
+          /* ── Associations full-area tree view ── */
+          <>
+            <div style={{ flex: 1, position: "relative", overflow: "hidden" }}>
+              <AssociationTreeView puzzle={aq} onRevealCell={phase === "answering" ? revealCell : null} onRevealCenter={phase === "answering" ? revealCenter : null} />
+            </div>
+            <div className="ctrl-panel">
+              <AssociationsPanel
+                aq={aq} turnP={turnP} otherP={otherP} phase={phase}
+                assocPoints={assocPoints} onAssocPointsChange={setAssocPoints}
+                onCorrect={correct} onWrong={wrong}
+                onSteal={() => upd({ phase: "steal" })} onSkipSteal={skipSteal}
+                onStealCorrect={() => stealResult(true)} onStealWrong={() => stealResult(false)}
+                onCancel={cancelQ}
+              />
+            </div>
+          </>
+        ) : (
+          /* ── Normal Jeopardy board ── */
+          <>
+            <div className="board-area">
+              <div className="board-wrap">
+                <div className="board">
+                  {board.map((topic, ti) => (
+                    <div key={ti} className="board-col">
+                      <div className="board-head" style={topic.type === "assoc" ? { background: "#2a0870", borderColor: "#6030c0" } : {}}>
+                        {topic.name || `Topic ${ti + 1}`}
                       </div>
-                    );
-                  })}
+                      {topic.qs.map((q, qi) => {
+                        const canClick = !q.done && phase === "picking";
+                        const isAssoc = q.type === "assoc";
+                        return (
+                          <div key={q.id}
+                            className={`board-cell${q.done ? " used" : canClick ? ` avail${isAssoc ? " assoc-cell" : ""}` : " locked"}`}
+                            onClick={() => canClick && upd({ phase: "answering", activeQ: { ti, qi } })}>
+                            {!q.done && q.points}
+                          </div>
+                        );
+                      })}
+                    </div>
+                  ))}
                 </div>
-              ))}
+              </div>
             </div>
-          </div>
-        </div>
 
-        <div className="ctrl-panel">
-          {!aq ? (
-            <div className="wait-panel">
-              <div style={{ fontSize: 42, opacity: .2 }}>👆</div>
-              <div style={{ fontWeight: 700, fontSize: 14, color: turnP?.color }}>{turnP?.name}</div>
-              <div className="muted" style={{ fontSize: 12 }}>Select a question from the board</div>
-            </div>
-          ) : (
+            <div className="ctrl-panel">
+              {!aq ? (
+                <div className="wait-panel">
+                  <div style={{ fontSize: 42, opacity: .2 }}>👆</div>
+                  <div style={{ fontWeight: 700, fontSize: 14, color: turnP?.color }}>{turnP?.name}</div>
+                  <div className="muted" style={{ fontSize: 12 }}>Select a question from the board</div>
+                </div>
+              ) : (
             <>
               <div className="q-display">
                 <div className="q-meta">
@@ -902,7 +1287,198 @@ function MatchScreen({ game, onUpdate }) {
             </>
           )}
         </div>
+          </>
+        )}
       </div>
+    </div>
+  );
+}
+
+
+// ─── Associations Panel ────────────────────────────────────────────────────────
+function AssociationsPanel({ aq, turnP, otherP, phase, assocPoints, onAssocPointsChange, onCorrect, onWrong, onSteal, onSkipSteal, onStealCorrect, onStealWrong, onCancel }) {
+  const half = Math.floor(assocPoints / 2);
+  const revealed = (aq.revealedCells || []).length;
+  const total = (aq.branches || []).reduce((a, b) => a + b.length, 0);
+
+  return (
+    <>
+      <div style={{ background: "#1a0640", border: "1px solid #5020a0", borderRadius: 10, padding: 12 }}>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+          <span style={{ fontSize: 10, fontWeight: 700, color: "#9060d0", textTransform: "uppercase", letterSpacing: ".6px" }}>Associations</span>
+          {phase === "answering" && <button onClick={onCancel} style={{ background: "none", color: "var(--muted)", fontSize: 13, padding: "1px 5px" }}>✕</button>}
+        </div>
+      </div>
+      <hr className="divider" />
+      {phase === "answering" && (
+        <div className="stack" style={{ gap: 8 }}>
+          <div className="muted" style={{ fontSize: 11, textAlign: "center" }}>{turnP?.name} is answering…</div>
+          <div style={{ background: "var(--surf2)", border: "1px solid var(--border)", borderRadius: 8, padding: "10px 12px" }}>
+            <div style={{ fontSize: 10, color: "var(--muted)", fontWeight: 700, textTransform: "uppercase", letterSpacing: ".6px", marginBottom: 6 }}>
+              Points for correct answer
+            </div>
+            <input type="text" inputMode="numeric" value={assocPoints || ""}
+              placeholder="Enter points…"
+              onChange={e => {
+                const clean = e.target.value.replace(/[^0-9]/g, "").replace(/^0+(\d)/, "$1");
+                onAssocPointsChange(clean === "" ? 0 : parseInt(clean));
+              }}
+              style={{ textAlign: "center", fontWeight: 900, fontSize: 18 }} />
+          </div>
+          <button className="ctrl-btn btn-green" onClick={onCorrect}>
+            ✓ Correct <span style={{ fontWeight: 400, fontSize: 12, color: "#86efac" }}>+{assocPoints}</span>
+          </button>
+          <button className="ctrl-btn btn-red" onClick={onWrong}>
+            ✗ Wrong <span style={{ fontWeight: 400, fontSize: 12, color: "#fca5a5" }}>0 pts</span>
+          </button>
+        </div>
+      )}
+      {phase === "steal_offer" && (
+        <div className="stack" style={{ gap: 8 }}>
+          <div className="steal-box">
+            <div className="steal-title">⚡ Steal Available</div>
+            <div className="steal-info">{otherP?.name} — ±{half} pts</div>
+          </div>
+          <button className="ctrl-btn btn-orange" onClick={onSteal}>Steal!</button>
+          <button className="ctrl-btn btn-ghost" onClick={onSkipSteal}>Skip → Next Turn</button>
+        </div>
+      )}
+      {phase === "steal" && (
+        <div className="stack" style={{ gap: 8 }}>
+          <div className="muted" style={{ fontSize: 11, textAlign: "center", color: "#fb923c" }}>{otherP?.name} is stealing…</div>
+          <button className="ctrl-btn btn-green" onClick={onStealCorrect}>
+            ✓ Correct <span style={{ fontWeight: 400, fontSize: 12, color: "#86efac" }}>+{half}</span>
+          </button>
+          <button className="ctrl-btn btn-red" onClick={onStealWrong}>
+            ✗ Wrong <span style={{ fontWeight: 400, fontSize: 12, color: "#fca5a5" }}>−{half}</span>
+          </button>
+        </div>
+      )}
+    </>
+  );
+}
+
+// ─── Association Tree View ────────────────────────────────────────────────────
+// Labels: top-left=A, top-right=B, bottom-left=C, bottom-right=D
+// Numbers: 1 = outermost (furthest), N = innermost (closest to center)
+// Spacing auto-scales so all cells fit regardless of N
+// ─── Association Tree View ────────────────────────────────────────────────────
+// Positions are computed so everything always fits:
+//   - innermost cell starts just past the center cell edge
+//   - outermost cell ends near the screen corner
+//   - cell width scales so no horizontal overlap between adjacent cells
+// ─── Association Tree View ────────────────────────────────────────────────────
+// Excel-style tiling: N cells fill the space from center-edge to screen-edge
+// exactly. Width = availableX/N, Height = availableY/N. Always fits, never gaps.
+// ─── Association Tree View ────────────────────────────────────────────────────
+// Decoupled sizing: cell DISPLAY size is fixed, step size drives POSITION only.
+// No overlap guaranteed because stepY > CELL_H for any N ≤ 7 (max configured).
+// Proof: stepY = AY/N = 35/7 = 5 > CELL_H = 4. ✓
+// Horizontally: consecutive branch cells share x-range but NOT y-range → no overlap.
+// Between branches (e.g. A vs C same x, different y): gap = 2*CY - CELL_H > 0. ✓
+function AssociationTreeView({ puzzle, onRevealCell, onRevealCenter }) {
+  const DIRS   = [{ dx:-1, dy:-1 }, { dx:1, dy:-1 }, { dx:-1, dy:1 }, { dx:1, dy:1 }];
+  const LABELS = ["A", "B", "C", "D"];
+
+  const branches     = (puzzle.branches || []).slice(0, 4);
+  const revealed     = new Set(puzzle.revealedCells || []);
+  const centerRevealed = !!puzzle.centerRevealed;
+  const canReveal    = !!onRevealCell;
+
+  // Center display size
+  const CENTER_W = 14;  // % — center width (same as branch cells)
+  const CENTER_H = 8;   // % — center height (slightly taller than branch cells)
+
+  // Branch start offsets (from screen center to innermost cell CENTER)
+  // Must clear center: CX ≥ CENTER_W/2 + CELL_W/2 = 7+7=14 → use 14 (just touching)
+  const CX = 14;  // % horizontal
+  const CY = 7;   // % vertical (≥ CENTER_H/2 + CELL_H/2 = 4+2=6 → use 7 for small gap)
+
+  // Available range for positioning (center of innermost to center of outermost)
+  // Outermost must fit: CX + AX + CELL_W/2 ≤ 50 → AX ≤ 50-14-7 = 29 → use 29
+  const AX = 29;  // %
+  const AY = 35;  // % (outermost: 7+35+2=44 < 50 ✓)
+
+  // Fixed cell display dimensions — wide flat rectangle
+  const CELL_W = 14;  // % width
+  const CELL_H = 4;   // % height (stepY=35/7=5 > 4 → no vertical overlap ✓)
+
+  return (
+    <div style={{ width:"100%", height:"100%", background:"#000", position:"relative", overflow:"hidden" }}>
+
+      {/* Center */}
+      <div
+        onClick={() => !centerRevealed && onRevealCenter && onRevealCenter()}
+        style={{
+          position:"absolute", left:"50%", top:"50%",
+          transform:"translate(-50%,-50%)",
+          background:"#000",
+          border:`3px solid ${centerRevealed ? "#fff" : "rgba(255,255,255,0.3)"}`,
+          width:`${CENTER_W}%`, height:`${CENTER_H}%`,
+          display:"flex", alignItems:"center", justifyContent:"center",
+          fontSize:"clamp(11px,1.6vw,22px)", fontWeight:900,
+          color: centerRevealed ? "#fff" : "transparent",
+          zIndex:10,
+          cursor: !centerRevealed && onRevealCenter ? "pointer" : "default",
+          transition:"color .25s, border-color .25s",
+          overflow:"hidden", textAlign:"center",
+        }}>
+        {puzzle.answer || "???"}
+      </div>
+
+      {branches.map((words, bi) => {
+        const dir   = DIRS[bi]   || DIRS[0];
+        const label = LABELS[bi] || String.fromCharCode(65 + bi);
+        const n     = words.length;
+        if (!n) return null;
+
+        // Step = total range / N  (evenly spaced, all fit)
+        const stepX = AX / n;
+        const stepY = AY / n;
+
+        // Font scales with available step space
+        const fs = Math.max(8, Math.min(14, Math.round(stepX * 1.4)));
+
+        return words.map((word, wi) => {
+          const key        = `${bi}-${wi}`;
+          const isRevealed = revealed.has(key);
+          const stepsOut   = n - 1 - wi;   // 0=innermost, n-1=outermost
+          const cellLabel  = `${label}${wi + 1}`; // A1=outermost, An=innermost
+
+          // Cell center: start offset + (slot + 0.5) * step
+          const xOff = CX + (stepsOut + 0.5) * stepX;
+          const yOff = CY + (stepsOut + 0.5) * stepY;
+
+          // Visual size: fixed, not tied to step
+          return (
+            <div key={key}
+              onClick={() => !isRevealed && canReveal && onRevealCell(bi, wi)}
+              style={{
+                position:"absolute",
+                left:`calc(50% + ${dir.dx * xOff}%)`,
+                top: `calc(50% + ${dir.dy * yOff}%)`,
+                transform:"translate(-50%,-50%)",
+                width:`${CELL_W}%`,
+                height:`${CELL_H}%`,
+                background:"#000",
+                border:`1.5px solid ${isRevealed ? "#fff" : "rgba(255,255,255,0.25)"}`,
+                display:"flex", flexDirection:"column",
+                alignItems:"center", justifyContent:"center",
+                overflow:"hidden",
+                zIndex:5,
+                cursor: !isRevealed && canReveal ? "pointer" : "default",
+                transition:"color .25s, border-color .25s",
+              }}>
+              <div style={{ fontSize:Math.max(6,fs-5), color:"rgba(255,255,255,0.4)", lineHeight:1, fontWeight:700, flexShrink:0 }}>
+                {cellLabel}
+              </div>
+              <div style={{ fontSize:fs, fontWeight:700, color:isRevealed?"#fff":"transparent", lineHeight:1.2, overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap", maxWidth:"90%" }}>
+                {word || "·"}
+              </div>
+            </div>
+          );
+        });
+      })}
     </div>
   );
 }
