@@ -59,7 +59,7 @@ function buildBoard(tr, assoc, bac, miniGames) {
   const triviaColumns = mg.includes("trivia")
     ? syncTopics(safeTr).topics.map(t => ({
         name: t.name || "—", type: "trivia",
-        qs: [...t.questions].sort((a, b) => a.points - b.points).map(q => ({ id: q.id, text: q.text, points: q.points, done: false }))
+        qs: [...t.questions].sort((a, b) => a.points - b.points).map(q => ({ id: q.id, text: q.text, points: q.points, imageUrl: q.imageUrl || null, done: false }))
       }))
     : [];
 
@@ -653,15 +653,27 @@ function TriviaEditor({ trivia, onChange }) {
           <div style={{ fontSize: 11, color: "var(--muted)", marginBottom: 8 }}>{filled}/{trivia.questionsPerTopic} questions filled</div>
           <div className="stack" style={{ gap: 8 }}>
             {cur.questions.map((q, qi) => (
-              <div key={q.id} className="q-row">
-                <span className="q-num">{qi + 1}.</span>
-                <input type="text" value={q.text} onChange={e => setQ(ti, qi, { text: e.target.value })}
-                  placeholder={`Question ${qi + 1}...`} style={{ flex: 1 }} />
-                <div className="pts-row">
-                  {PTS.map(p => (
-                    <button key={p} onClick={() => setQ(ti, qi, { points: p })}
-                      className={`pts-chip${q.points === p ? " on" : ""}`}>{p}</button>
-                  ))}
+              <div key={q.id} style={{ background: "var(--surf3)", borderRadius: 8, padding: 10 }}>
+                <div className="q-row" style={{ marginBottom: q.imageUrl ? 8 : 0 }}>
+                  <span className="q-num">{qi + 1}.</span>
+                  <input type="text" value={q.text} onChange={e => setQ(ti, qi, { text: e.target.value })}
+                    placeholder={`Question ${qi + 1}...`} style={{ flex: 1 }} />
+                  <div className="pts-row">
+                    {PTS.map(p => (
+                      <button key={p} onClick={() => setQ(ti, qi, { points: p })}
+                        className={`pts-chip${q.points === p ? " on" : ""}`}>{p}</button>
+                    ))}
+                  </div>
+                </div>
+                <div className="row gap2" style={{ paddingLeft: 22 }}>
+                  <input type="text" value={q.imageUrl || ""} onChange={e => setQ(ti, qi, { imageUrl: e.target.value })}
+                    placeholder="Image URL (optional)..." style={{ fontSize: 11, color: "var(--muted)" }} />
+                  {q.imageUrl && (
+                    <a href={q.imageUrl} target="_blank" rel="noreferrer"
+                      style={{ fontSize: 11, color: "var(--gold)", whiteSpace: "nowrap", textDecoration: "none", flexShrink: 0 }}>
+                      Preview ↗
+                    </a>
+                  )}
                 </div>
               </div>
             ))}
@@ -1098,6 +1110,20 @@ function MatchScreen({ game, onUpdate }) {
   const gp = id => game.players.find(p => p.id === id);
   const turnP = gp(turn), otherP = gp(turn === p1 ? p2 : p1);
   const aq = activeQ ? board[activeQ.ti].qs[activeQ.qi] : null;
+
+  // imageUrl: read from board, or fall back to original round trivia data by question id
+  const aqImageUrl = (() => {
+    if (!aq || aq.type === "assoc" || aq.type === "buildacard") return null;
+    if (aq.imageUrl) return aq.imageUrl;
+    // Fallback: search original round data by question id
+    for (const r of (game.rounds || [])) {
+      for (const t of (r.trivia?.topics || [])) {
+        const q = t.questions?.find(q => q.id === aq.id);
+        if (q?.imageUrl) return q.imageUrl;
+      }
+    }
+    return null;
+  })();
   // Find questionTime from the round that was used for this match
   const questionTime = (() => {
     const rounds = game.rounds || [];
@@ -1394,6 +1420,20 @@ function MatchScreen({ game, onUpdate }) {
                     <button onClick={cancelQ} style={{ background: "none", color: "var(--muted)", fontSize: 13, padding: "1px 5px" }}>✕</button>
                   )}
                 </div>
+                {aqImageUrl && (
+                  <div style={{ marginBottom: 8 }}>
+                    <img src={aqImageUrl} alt="question"
+                      style={{ width: "100%", maxHeight: 160, borderRadius: 6, objectFit: "contain", cursor: "pointer", display: "block" }}
+                      onClick={() => window.open(aqImageUrl, "_blank")}
+                      onError={e => { e.target.style.display = "none"; }}
+                    />
+                    <div style={{ textAlign: "center", marginTop: 4 }}>
+                      <a href={aqImageUrl} target="_blank" rel="noreferrer" style={{ fontSize: 10, color: "var(--gold)", textDecoration: "none" }}>
+                        Open full size ↗
+                      </a>
+                    </div>
+                  </div>
+                )}
                 <div className="q-text">{aq.text || "(no question text)"}</div>
               </div>
 
