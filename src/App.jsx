@@ -1598,7 +1598,7 @@ function AssociationTreeView({ puzzle, onRevealCell, onRevealCenter }) {
   const TEXT_C   = "#e8f0ff";   // revealed text
   const LABEL_C  = "rgba(180,200,255,0.55)";
 
-  const CENTER_W = 14, CENTER_H = 8;
+  const CENTER_W = 20, CENTER_H = 10;
   const CX = 13, CY = 4;
   const AX = 29, AY = 35;
   const CELL_H_PCT = 7.5; // cell height % — stepY > CELL_H guaranteed for n≤7
@@ -1614,18 +1614,19 @@ function AssociationTreeView({ puzzle, onRevealCell, onRevealCenter }) {
           transform:"translate(-50%,-50%)",
           background: centerRevealed ? CELL_BG : BG,
           border:`3px solid ${centerRevealed ? BORDER_H : BORDER_L}`,
-          width:`${CENTER_W}%`, height:`${CENTER_H}%`,
+          minWidth:`${CENTER_W}%`, width:"auto", height:`${CENTER_H}%`,
           display:"flex", alignItems:"center", justifyContent:"center",
           fontSize:"clamp(13px,2vw,26px)", fontWeight:900,
           color: centerRevealed ? TEXT_C : "transparent",
           zIndex:10,
           cursor: !centerRevealed && onRevealCenter ? "pointer" : "default",
           transition:"color .25s, border-color .25s, background .25s",
-          overflow:"hidden", textAlign:"center",
+          overflow:"visible", whiteSpace:"nowrap",
+          padding:"0 18px",
           borderRadius:4,
           boxShadow: centerRevealed ? `0 0 20px rgba(74,122,255,0.25)` : "none",
         }}>
-        {puzzle.answer || "???"}
+        {puzzle.answer || "\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0"}
       </div>
 
       {branches.map((words, bi) => {
@@ -1656,27 +1657,27 @@ function AssociationTreeView({ puzzle, onRevealCell, onRevealCenter }) {
               <div style={{ fontSize:Math.max(7, fs-5), color:LABEL_C, lineHeight:1, fontWeight:700, whiteSpace:"nowrap" }}>
                 {cellLabel}
               </div>
-              {/* Cell — auto-width when revealed, fixed min-width when hidden */}
+              {/* Cell: minWidth=17% so hidden cells look wide; after reveal width grows with text */}
               <div
                 onClick={() => !isRevealed && canReveal && onRevealCell(bi, wi)}
                 style={{
                   background: isRevealed ? CELL_BG : BG,
                   border:`1.5px solid ${isRevealed ? BORDER_H : BORDER_L}`,
-                  // Auto-width after reveal: text drives width; hidden = fixed narrow box
-                  minWidth: isRevealed ? "auto" : `${stepX * 1.7}%`,
-                  width: isRevealed ? "max-content" : `${stepX * 1.7}%`,
-                  maxWidth: "32%",
+                  minWidth: "17%",
+                  // Use table layout trick: shrinkwrap to content but never below minWidth
+                  width: "auto",
                   height:`${CELL_H_PCT}%`,
                   display:"flex", alignItems:"center", justifyContent:"center",
-                  overflow:"hidden",
+                  overflow:"visible",
+                  whiteSpace:"nowrap",
                   cursor: !isRevealed && canReveal ? "pointer" : "default",
-                  transition:"color .25s, border-color .25s, background .25s, width .3s",
+                  transition:"border-color .25s, background .25s",
                   borderRadius:3,
-                  padding: isRevealed ? "0 10px" : 0,
+                  padding:"0 14px",
                   boxShadow: isRevealed ? `0 0 10px rgba(74,122,255,0.2)` : "none",
                 }}>
-                <span style={{ fontSize:fs, fontWeight:800, color: isRevealed ? TEXT_C : "transparent", whiteSpace:"nowrap" }}>
-                  {word || "·"}
+                <span style={{ fontSize:fs, fontWeight:800, color: isRevealed ? TEXT_C : "transparent", whiteSpace:"nowrap", display:"block" }}>
+                  {word || "\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0"}
                 </span>
               </div>
             </div>
