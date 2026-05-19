@@ -12,7 +12,7 @@ const sSet = async (k, v) => { try { localStorage.setItem(k, JSON.stringify(v));
 const sDel = async k => { try { localStorage.removeItem(k); } catch {} };
 
 // ─── Data helpers ─────────────────────────────────────────────────────────────
-const ROUND_NAMES = { 2: ["Final"], 4: ["Semifinals", "Final"], 8: ["Quarterfinals", "Semifinals", "Final"] };
+const ROUND_NAMES = { 2: ["Final"], 4: ["Semifinal 1", "Semifinal 2", "Final"] };
 
 const freshRound = (name = "Round 1") => ({
   id: uid(), name,
@@ -551,7 +551,7 @@ function ShowEditor({ show, onChange, onSave, onCancel }) {
         <Card>
           <SectionLabel>Players — determines bracket & number of rounds</SectionLabel>
           <div className="row gap2">
-            {[2, 4, 8].map(n => (
+            {[2, 4].map(n => (
               <button key={n} onClick={() => setPlayerCount(n)}
                 className={`count-btn${show.playerCount === n ? " on" : ""}`}>
                 {n}
@@ -597,6 +597,12 @@ function ShowEditor({ show, onChange, onSave, onCancel }) {
               <TriviaEditor
                 trivia={cur.trivia || freshRound().trivia}
                 onChange={t => updRound(ai, { trivia: t })}
+              />
+            )}
+            {(cur.miniGames || []).includes("buildacard") && (
+              <BuildACardEditor
+                bac={cur.buildacard || { rounds: [] }}
+                onChange={b => updRound(ai, { buildacard: b })}
               />
             )}
             {(cur.miniGames || []).includes("associations") && (
@@ -998,7 +1004,7 @@ function PlaySetup({ show, onStart, onCancel }) {
         <Card>
           <SectionLabel>Number of Players</SectionLabel>
           <div className="row gap2">
-            {[2, 4, 8].map(n => (
+            {[2, 4].map(n => (
               <button key={n} onClick={() => changeCount(n)} className={`count-btn${count === n ? " on" : ""}`}>{n}</button>
             ))}
           </div>
@@ -1089,12 +1095,12 @@ function BracketScreen({ game, onUpdate, onBack }) {
 
   const startMatch = async matchId => {
     const m = bracket.flat().find(x => x.id === matchId); if (!m) return;
-    // Find which bracket round this match is in
-    let ri = 0;
-    bracket.forEach((r, r2) => r.forEach(mm => { if (mm.id === matchId) ri = r2; }));
-    // Pick question round (use last round if bracket has more rounds than question rounds)
+    // Flat index: count all matches in order across bracket rounds
+    let flatIdx = 0;
+    bracket.forEach(r => r.forEach(mm => { if (mm.id === matchId) return; flatIdx++; }));
+    // Each match maps to its own round (Semifinal 1 → rounds[0], Semifinal 2 → rounds[1], Final → rounds[2])
     const rounds = game.rounds || [];
-    const roundData = rounds[Math.min(ri, Math.max(rounds.length - 1, 0))] || { miniGames: ["trivia"], trivia: { topicCount: 0, questionsPerTopic: 0, topics: [] }, associations: { puzzles: [] }, buildacard: { rounds: [] }, connections: { rounds: [] } };
+    const roundData = rounds[Math.min(flatIdx, rounds.length - 1)] || { miniGames: ["trivia"], trivia: { topicCount: 0, questionsPerTopic: 0, topics: [] }, associations: { puzzles: [] }, buildacard: { rounds: [] }, connections: { rounds: [] } };
     const md = { p1: m.p1, p2: m.p2, scores: { [m.p1]: 0, [m.p2]: 0 }, board: buildBoard(roundData.trivia, roundData.associations, roundData.buildacard, roundData.connections, roundData.miniGames || ["trivia"]), turn: m.p1, phase: "select_minigame", activeMinigame: null, completedMinigames: [], activeQ: null, roundMiniGames: roundData.miniGames || ["trivia"] };
     await onUpdate({ ...game, activeMatchId: matchId, subView: "match", matches: { ...matches, [matchId]: md } });
   };
@@ -1402,7 +1408,6 @@ function MatchScreen({ game, onUpdate }) {
               } else if (slot === "reset") {
                 newAssigned.mana = null; newAssigned.attack = null; newAssigned.health = null; newAssigned.keywords = [];
               } else if (slot === "_pts") {
-                // Store pts directly on the question
                 const nb = board.map((t,ti)=>({...t, qs:t.qs.map((q,qi)=>ti===activeQ.ti&&qi===activeQ.qi?{...q,_pts:val}:q)}));
                 await upd({ board: nb }); return;
               } else {
@@ -1411,9 +1416,15 @@ function MatchScreen({ game, onUpdate }) {
               const nb = board.map((t,ti)=>({...t, qs:t.qs.map((q,qi)=>ti===activeQ.ti&&qi===activeQ.qi?{...q,assigned:newAssigned}:q)}));
               await upd({ board: nb });
             }}
-            onCorrect={correct} onWrong={wrong}
-            onSteal={()=>upd({phase:"steal"})} onSkipSteal={skipSteal}
-            onStealCorrect={()=>stealResult(true)} onStealWrong={()=>stealResult(false)}
+            onAwardPoints={async pts => {
+              const ns = { ...scores, [turn]: (scores[turn]||0) + pts };
+              await upd({ scores: ns });
+            }}
+            onFinish={async () => {
+              const nb = markBoard();
+              if (minigameDone("buildacard", nb)) await endMatch(scores, nb);
+              else await upd({ phase:"picking", activeQ:null, board:nb });
+            }}
             onCancel={cancelQ}
           />
         ) : aq?.type === "connections" ? (
@@ -1674,7 +1685,7 @@ function AssociationsPanel({ aq, turnP, otherP, phase, assocPoints, onAssocPoint
           <div className="muted" style={{ fontSize: 11, textAlign: "center" }}>{turnP?.name} is answering…</div>
           <div style={{ background: "var(--surf2)", border: "1px solid var(--border)", borderRadius: 8, padding: "10px 12px" }}>
             <div style={{ fontSize: 10, color: "var(--muted)", fontWeight: 700, textTransform: "uppercase", letterSpacing: ".6px", marginBottom: 6 }}>
-              Points for correct answer
+              Award points
             </div>
             <input type="text" inputMode="numeric" value={assocPoints || ""}
               placeholder="Enter points…"
@@ -1682,11 +1693,11 @@ function AssociationsPanel({ aq, turnP, otherP, phase, assocPoints, onAssocPoint
                 const clean = e.target.value.replace(/[^0-9]/g, "").replace(/^0+(\d)/, "$1");
                 onAssocPointsChange(clean === "" ? 0 : parseInt(clean));
               }}
-              style={{ textAlign: "center", fontWeight: 900, fontSize: 18 }} />
+              style={{ textAlign: "center", fontWeight: 900, fontSize: 18, marginBottom: 8 }} />
+            <button className="ctrl-btn btn-green" onClick={onCorrect} style={{ width: "100%" }} disabled={!assocPoints}>
+              ✓ Award {assocPoints ? `+${assocPoints} pts` : ""}
+            </button>
           </div>
-          <button className="ctrl-btn btn-green" onClick={onCorrect}>
-            ✓ Correct <span style={{ fontWeight: 400, fontSize: 12, color: "#86efac" }}>+{assocPoints}</span>
-          </button>
           <button className="ctrl-btn btn-red" onClick={onWrong}>
             ✗ Wrong <span style={{ fontWeight: 400, fontSize: 12, color: "#fca5a5" }}>0 pts</span>
           </button>
@@ -1743,6 +1754,66 @@ function AssociationsPanel({ aq, turnP, otherP, phase, assocPoints, onAssocPoint
 //   All cells fit: outermost at CX + (N-0.5)*stepX ≤ CX + AX = 50% ✓
 // ─── Association Tree View ────────────────────────────────────────────────────
 // All cells identical size — determined by the longest word across all branches.
+// ─── Build a Card Game ────────────────────────────────────────────────────────
+function BuildACardGame({ aq, turnP, otherP, phase, onAssign, onAwardPoints, onFinish, onCancel }) {
+  const [selected, setSelected] = useState(null);
+  const assigned = aq.assigned || { mana: null, attack: null, health: null, keywords: [] };
+  const numbers  = aq.numbers  || [];
+  const keywords = aq.keywords || [];
+  const half = Math.floor((aq._pts || 0) / 2);
+  const usedNumIndices = new Set([assigned.mana, assigned.attack, assigned.health].filter(v => v !== null));
+
+  const selectNum = (idx) => { if (usedNumIndices.has(idx)) return; setSelected(selected?.type==="number"&&selected.idx===idx?null:{type:"number",idx}); };
+  const selectKw  = (idx) => { if ((assigned.keywords||[]).includes(idx)) return; setSelected(selected?.type==="keyword"&&selected.idx===idx?null:{type:"keyword",idx}); };
+  const clickSlot = async (slot) => {
+    if (phase!=="answering") return;
+    if (slot==="keyword") { if (selected?.type==="keyword"){await onAssign("keyword_add",selected.idx);setSelected(null);} }
+    else { if (selected?.type==="number"){await onAssign(slot,selected.idx);setSelected(null);} else if(assigned[slot]!==null){await onAssign(slot,null);} }
+  };
+  const removeKw = async (pos) => { if (phase!=="answering") return; await onAssign("keyword_remove",pos); };
+  const reset = async () => { setSelected(null); await onAssign("reset",null); };
+
+  const slotStyle = (active,filled) => ({ background:filled?"#0a2840":active?"rgba(74,158,255,0.12)":"rgba(255,255,255,0.04)", border:`2px solid ${active?"#4a9eff":filled?"#4a9eff":"rgba(255,255,255,0.2)"}`, cursor:phase==="answering"?"pointer":"default", display:"flex", alignItems:"center", justifyContent:"center", borderRadius:6, transition:"all .2s", color:filled?"#e8f4ff":"rgba(255,255,255,0.3)", fontWeight:800, fontFamily:"'Barlow Condensed',sans-serif" });
+
+  return (
+    <div style={{flex:1,display:"flex",overflow:"hidden"}}>
+      <div style={{flex:1,display:"flex",alignItems:"center",justifyContent:"center",padding:20,background:"#03082a"}}>
+        <div style={{position:"relative",width:"min(340px,48%)",aspectRatio:"0.72",background:"linear-gradient(160deg,#0d1f3c,#061228)",border:"2px solid #2a4a7a",borderRadius:12,boxShadow:"0 8px 40px rgba(0,0,50,0.8)",overflow:"hidden"}}>
+          <div onClick={()=>clickSlot("mana")} style={{...slotStyle(phase==="answering"&&selected?.type==="number"&&assigned.mana===null,assigned.mana!==null),position:"absolute",top:10,left:10,width:48,height:48,borderRadius:"50%",fontSize:22}}>{assigned.mana!==null?numbers[assigned.mana]:"?"}</div>
+          <div onClick={()=>clickSlot("keyword")} style={{...slotStyle(phase==="answering"&&selected?.type==="keyword",(assigned.keywords||[]).length>0),position:"absolute",left:"10%",right:"10%",top:"52%",minHeight:44,flexDirection:"column",gap:4,padding:"6px 10px"}}>
+            {(assigned.keywords||[]).length===0?<span style={{fontSize:12}}>KEYWORD</span>:<div style={{display:"flex",flexWrap:"wrap",gap:4}}>{(assigned.keywords||[]).map((ki,pos)=><span key={pos} onClick={e=>{e.stopPropagation();removeKw(pos);}} style={{background:"rgba(74,158,255,0.2)",border:"1px solid #4a9eff",borderRadius:4,padding:"1px 8px",fontSize:12,fontWeight:700,color:"#a8d8ff",cursor:"pointer"}}>{keywords[ki]} ✕</span>)}</div>}
+          </div>
+          <div onClick={()=>clickSlot("attack")} style={{...slotStyle(phase==="answering"&&selected?.type==="number"&&assigned.attack===null,assigned.attack!==null),position:"absolute",bottom:12,left:12,width:52,height:52,borderRadius:8,fontSize:24}}>{assigned.attack!==null?numbers[assigned.attack]:"?"}</div>
+          <div onClick={()=>clickSlot("health")} style={{...slotStyle(phase==="answering"&&selected?.type==="number"&&assigned.health===null,assigned.health!==null),position:"absolute",bottom:12,right:12,width:52,height:52,borderRadius:8,fontSize:24}}>{assigned.health!==null?numbers[assigned.health]:"?"}</div>
+        </div>
+      </div>
+      <div className="ctrl-panel" style={{minWidth:280}}>
+        <div style={{fontSize:10,color:"var(--muted)",fontWeight:700,textTransform:"uppercase",letterSpacing:".6px",marginBottom:8}}>🃏 Build-a-Card {phase==="answering"?`— ${turnP?.name}`:""}</div>
+        {aq.imageUrl&&<div style={{marginBottom:10}}><a href={aq.imageUrl} target="_blank" rel="noreferrer" style={{display:"block",textDecoration:"none"}}><img src={aq.imageUrl} alt="card" style={{width:"100%",maxHeight:130,objectFit:"contain",borderRadius:6,cursor:"pointer",display:"block",marginBottom:3}} onError={e=>{e.target.style.display="none";}}/><div style={{textAlign:"center",fontSize:10,color:"var(--gold)"}}>Open full size ↗</div></a><hr className="divider" style={{marginTop:8}}/></div>}
+        {phase==="answering"&&<>
+          {numbers.length>0&&<div style={{marginBottom:10}}><div style={{fontSize:10,color:"var(--muted)",fontWeight:700,marginBottom:5}}>NUMBERS — click then assign to slot</div><div className="row gap2 wrap">{numbers.map((n,i)=>{const isUsed=usedNumIndices.has(i),isSel=selected?.type==="number"&&selected.idx===i;return <button key={i} onClick={()=>!isUsed&&selectNum(i)} style={{padding:"6px 14px",borderRadius:8,fontWeight:900,fontSize:16,fontFamily:"'Barlow Condensed',sans-serif",background:isUsed?"var(--surf3)":isSel?"var(--gold)":"var(--surf2)",border:`1.5px solid ${isUsed?"var(--dim)":isSel?"var(--gold)":"var(--border)"}`,color:isUsed?"var(--dim)":isSel?"#04091e":"var(--text)",cursor:isUsed?"default":"pointer",opacity:isUsed?0.45:1,textDecoration:isUsed?"line-through":"none"}}>{n}</button>})}</div></div>}
+          {keywords.length>0&&<div style={{marginBottom:10}}><div style={{fontSize:10,color:"var(--muted)",fontWeight:700,marginBottom:5}}>KEYWORDS — click then assign</div><div className="row gap2 wrap">{keywords.map((k,i)=>{const isUsed=(assigned.keywords||[]).includes(i),isSel=selected?.type==="keyword"&&selected.idx===i;return <button key={i} onClick={()=>!isUsed&&selectKw(i)} style={{padding:"5px 12px",borderRadius:8,fontWeight:700,fontSize:13,background:isUsed?"var(--surf3)":isSel?"var(--gold)":"var(--surf2)",border:`1.5px solid ${isUsed?"var(--dim)":isSel?"var(--gold)":"var(--border)"}`,color:isUsed?"var(--dim)":isSel?"#04091e":"var(--text)",cursor:isUsed?"default":"pointer",opacity:isUsed?0.45:1}}>{k}</button>})}</div></div>}
+          {selected&&<div style={{padding:"6px 10px",background:"rgba(245,197,24,.08)",border:"1px solid rgba(245,197,24,.3)",borderRadius:6,marginBottom:8,fontSize:12,color:"var(--gold)",fontWeight:700}}>Selected: {selected.type==="number"?numbers[selected.idx]:keywords[selected.idx]} — click a slot on the card</div>}
+          <hr className="divider"/>
+          <Btn variant="ghost" block size="sm" onClick={reset} style={{marginBottom:8}}>↺ Reset Card</Btn>
+          <div style={{marginBottom:8}}>
+            <div style={{fontSize:10,color:"var(--muted)",fontWeight:700,textTransform:"uppercase",letterSpacing:".6px",marginBottom:5}}>Award points</div>
+            <input type="text" inputMode="numeric" value={aq._pts??""} placeholder="Enter points..."
+              onChange={e=>{const c=e.target.value.replace(/[^0-9]/g,"").replace(/^0+(\d)/,"$1");onAssign("_pts",c===""?"":parseInt(c));}}
+              style={{textAlign:"center",fontWeight:900,fontSize:18,marginBottom:8}}/>
+            <button className="ctrl-btn btn-green" onClick={()=>onAwardPoints(aq._pts||0)} disabled={!aq._pts} style={{width:"100%"}}>
+              ✓ Award {aq._pts?`+${aq._pts} pts`:""}
+            </button>
+          </div>
+          <hr className="divider"/>
+          <button className="ctrl-btn btn-ghost" onClick={onFinish}>End Card</button>
+        </>}
+      </div>
+    </div>
+  );
+}
+
+// ─── Association Tree View (sizer-based uniform cells) ────────────────────────
 // Technique: invisible "sizer" span with longestWord in every cell → all cells
 // always exactly the same width, before AND after reveal. No layout shifts.
 function AssociationTreeView({ puzzle, onRevealCell, onRevealCenter }) {
