@@ -19,7 +19,8 @@ const freshRound = (name = "Round 1") => ({
   miniGames: ["trivia"],
   trivia: { topicCount: 2, questionsPerTopic: 5, questionTime: 25, topics: [] },
   associations: { puzzles: [] },
-  buildacard: { rounds: [] }
+  buildacard: { rounds: [] },
+  connections: { rounds: [] }
 });
 
 const freshShowRounds = (playerCount) =>
@@ -31,11 +32,10 @@ const freshShow = () => ({
   rounds: freshShowRounds(4)
 });
 
-// Normalise old shows (top-level trivia/associations, no rounds, no playerCount)
 const normaliseShow = show => {
   const rounds = show.rounds?.length
-    ? show.rounds.map(r => ({ buildacard: { rounds: [] }, miniGames: show.miniGames || ["trivia"], ...r }))
-    : [{ id: uid(), name: "Round 1", miniGames: show.miniGames || ["trivia"], trivia: show.trivia || freshRound().trivia, associations: show.associations || freshRound().associations, buildacard: { rounds: [] } }];
+    ? show.rounds.map(r => ({ buildacard: { rounds: [] }, connections: { rounds: [] }, miniGames: show.miniGames || ["trivia"], ...r }))
+    : [{ id: uid(), name: "Round 1", miniGames: show.miniGames || ["trivia"], trivia: show.trivia || freshRound().trivia, associations: show.associations || freshRound().associations, buildacard: { rounds: [] }, connections: { rounds: [] } }];
   return { playerCount: 4, ...show, rounds };
 };
 
@@ -50,16 +50,26 @@ function syncTopics(tr) {
   return { ...tr, topics: ts };
 }
 
-function buildBoard(tr, assoc, bac, miniGames) {
+function shuffle(arr) {
+  const a = [...arr];
+  for (let i = a.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [a[i], a[j]] = [a[j], a[i]];
+  }
+  return a;
+}
+
+function buildBoard(tr, assoc, bac, conn, miniGames) {
   const safeTr = tr || { topicCount: 0, questionsPerTopic: 0, topics: [] };
   const safeAssoc = assoc || { puzzles: [] };
   const safeBac = bac || { rounds: [] };
+  const safeConn = conn || { rounds: [] };
   const mg = miniGames || [];
 
   const triviaColumns = mg.includes("trivia")
     ? syncTopics(safeTr).topics.map(t => ({
         name: t.name || "—", type: "trivia",
-        qs: [...t.questions].sort((a, b) => a.points - b.points).map(q => ({ id: q.id, text: q.text, points: q.points, imageUrl: q.imageUrl || null, done: false }))
+        qs: [...t.questions].sort((a, b) => a.points - b.points).map(q => ({ id: q.id, text: q.text, answer: q.answer || "", points: q.points, imageUrl: q.imageUrl || null, done: false }))
       }))
     : [];
 
@@ -77,18 +87,41 @@ function buildBoard(tr, assoc, bac, miniGames) {
 
   const bacRounds = (safeBac.rounds || []).filter(r => r.numbers?.length || r.keywords?.length);
   const bacColumn = mg.includes("buildacard") && bacRounds.length ? {
-    name: "Build a Card", type: "buildacard",
+    name: "Build-a-Card", type: "buildacard",
     qs: bacRounds.map(r => ({
       id: r.id, type: "buildacard",
       numbers: r.numbers || [],
       keywords: r.keywords || [],
-      points: r.points || 500,
+      imageUrl: r.imageUrl || null,
       assigned: { mana: null, attack: null, health: null, keywords: [] },
       done: false
     }))
   } : null;
 
-  return [...triviaColumns, ...(assocColumn ? [assocColumn] : []), ...(bacColumn ? [bacColumn] : [])];
+  const connRounds = (safeConn.rounds || []).filter(r => r.pairs?.some(p => p.a && p.b));
+  const connColumn = mg.includes("connections") && connRounds.length ? {
+    name: "Connections", type: "connections",
+    qs: connRounds.map(r => {
+      const validPairs = r.pairs.filter(p => p.a && p.b);
+      return {
+        id: r.id, type: "connections",
+        pairs: validPairs,
+        colA: shuffle(validPairs.map(p => ({ pairId: p.id, word: p.a }))),
+        colB: shuffle(validPairs.map(p => ({ pairId: p.id, word: p.b }))),
+        matched: [],      // array of pairIds correctly matched
+        selectedA: null,  // pairId currently selected in col A
+        lastResult: null, // { pairId, correct } brief flash
+        done: false
+      };
+    })
+  } : null;
+
+  return [
+    ...triviaColumns,
+    ...(assocColumn ? [assocColumn] : []),
+    ...(bacColumn ? [bacColumn] : []),
+    ...(connColumn ? [connColumn] : [])
+  ];
 }
 
 function buildBracket(players) {
@@ -354,7 +387,7 @@ export default function App() {
       onStart={async (players, bracket) => {
         const g = {
           showId: editing.id, showName: editing.name,
-          rounds: (editing.rounds || []).map(r => ({ ...r, trivia: syncTopics(r.trivia || freshRound().trivia), associations: r.associations || { puzzles: [] }, buildacard: r.buildacard || { rounds: [] } })),
+          rounds: (editing.rounds || []).map(r => ({ ...r, trivia: syncTopics(r.trivia || freshRound().trivia), associations: r.associations || { puzzles: [] }, buildacard: r.buildacard || { rounds: [] }, connections: r.connections || { rounds: [] } })),
           players, bracket, matches: {}, activeMatchId: null, subView: "bracket"
         };
         await updateGame(editing.id, g);
@@ -465,9 +498,9 @@ function ShowEditor({ show, onChange, onSave, onCancel }) {
 
   const AVAILABLE_GAMES = [
     { id: "trivia",       label: "Trivia",          icon: "❓", ok: true  },
-    { id: "buildacard",   label: "Build a Card",    icon: "🃏", ok: true  },
+    { id: "buildacard",   label: "Build-a-Card",    icon: "🃏", ok: true  },
     { id: "associations", label: "Associations",     icon: "🔗", ok: true  },
-    { id: "pairs",        label: "Pairs Connection", icon: "🔀", ok: false },
+    { id: "connections",  label: "Connections",      icon: "🔀", ok: true  },
   ];
 
   const rounds = show.rounds || [];
@@ -572,10 +605,10 @@ function ShowEditor({ show, onChange, onSave, onCancel }) {
                 onChange={a => updRound(ai, { associations: a })}
               />
             )}
-            {(cur.miniGames || []).includes("buildacard") && (
-              <BuildACardEditor
-                bac={cur.buildacard || { rounds: [] }}
-                onChange={b => updRound(ai, { buildacard: b })}
+            {(cur.miniGames || []).includes("connections") && (
+              <ConnectionsEditor
+                conn={cur.connections || { rounds: [] }}
+                onChange={c => updRound(ai, { connections: c })}
               />
             )}
           </>)}
@@ -651,10 +684,10 @@ function TriviaEditor({ trivia, onChange }) {
             <input type="text" value={cur.name} onChange={e => setName(ti, e.target.value)} placeholder="Category name..." style={{ fontWeight: 700 }} />
           </div>
           <div style={{ fontSize: 11, color: "var(--muted)", marginBottom: 8 }}>{filled}/{trivia.questionsPerTopic} questions filled</div>
-          <div className="stack" style={{ gap: 8 }}>
+          <div className="stack" style={{ gap: 10 }}>
             {cur.questions.map((q, qi) => (
               <div key={q.id} style={{ background: "var(--surf3)", borderRadius: 8, padding: 10 }}>
-                <div className="q-row" style={{ marginBottom: q.imageUrl ? 8 : 0 }}>
+                <div className="q-row" style={{ marginBottom: 8 }}>
                   <span className="q-num">{qi + 1}.</span>
                   <input type="text" value={q.text} onChange={e => setQ(ti, qi, { text: e.target.value })}
                     placeholder={`Question ${qi + 1}...`} style={{ flex: 1 }} />
@@ -666,6 +699,10 @@ function TriviaEditor({ trivia, onChange }) {
                   </div>
                 </div>
                 <div className="row gap2" style={{ paddingLeft: 22 }}>
+                  <input type="text" value={q.answer || ""} onChange={e => setQ(ti, qi, { answer: e.target.value })}
+                    placeholder="Answer..." style={{ fontSize: 12 }} />
+                </div>
+                <div className="row gap2" style={{ paddingLeft: 22, marginTop: 6 }}>
                   <input type="text" value={q.imageUrl || ""} onChange={e => setQ(ti, qi, { imageUrl: e.target.value })}
                     placeholder="Image URL (optional)..." style={{ fontSize: 11, color: "var(--muted)" }} />
                   {q.imageUrl && (
@@ -841,7 +878,7 @@ function BuildACardEditor({ bac, onChange }) {
   return (
     <Card>
       <div className="row gap2" style={{ marginBottom: 14 }}>
-        <SectionLabel style={{ margin: 0, flex: 1 }}>Build a Card — Rounds</SectionLabel>
+        <SectionLabel style={{ margin: 0, flex: 1 }}>Build-a-Card — Rounds</SectionLabel>
         <Btn size="sm" onClick={addRound}>+ Add Round</Btn>
       </div>
       {rounds.length === 0 && <div className="muted" style={{ textAlign: "center", padding: "20px 0", fontSize: 13 }}>No rounds yet — click "Add Round".</div>}
@@ -855,6 +892,20 @@ function BuildACardEditor({ bac, onChange }) {
         </div>
         {cur && (
           <div className="q-editor fade">
+            {/* Image URL */}
+            <div style={{ marginBottom: 14 }}>
+              <label style={{ fontSize: 11, color: "var(--muted)", fontWeight: 600, display: "block", marginBottom: 5 }}>Card Image URL (optional)</label>
+              <div className="row gap2">
+                <input type="text" value={cur.imageUrl || ""} onChange={e => updRound(cur.id, { imageUrl: e.target.value })}
+                  placeholder="Image URL..." />
+                {cur.imageUrl && (
+                  <a href={cur.imageUrl} target="_blank" rel="noreferrer"
+                    style={{ fontSize: 11, color: "var(--gold)", whiteSpace: "nowrap", textDecoration: "none", flexShrink: 0 }}>
+                    Preview ↗
+                  </a>
+                )}
+              </div>
+            </div>
             {/* Numbers pool */}
             <div style={{ marginBottom: 14 }}>
               <div className="section-label">Numbers pool</div>
@@ -1043,8 +1094,8 @@ function BracketScreen({ game, onUpdate, onBack }) {
     bracket.forEach((r, r2) => r.forEach(mm => { if (mm.id === matchId) ri = r2; }));
     // Pick question round (use last round if bracket has more rounds than question rounds)
     const rounds = game.rounds || [];
-    const roundData = rounds[Math.min(ri, Math.max(rounds.length - 1, 0))] || { miniGames: ["trivia"], trivia: { topicCount: 0, questionsPerTopic: 0, topics: [] }, associations: { puzzles: [] }, buildacard: { rounds: [] } };
-    const md = { p1: m.p1, p2: m.p2, scores: { [m.p1]: 0, [m.p2]: 0 }, board: buildBoard(roundData.trivia, roundData.associations, roundData.buildacard, roundData.miniGames || ["trivia"]), turn: m.p1, phase: "select_minigame", activeMinigame: null, completedMinigames: [], activeQ: null, roundMiniGames: roundData.miniGames || ["trivia"] };
+    const roundData = rounds[Math.min(ri, Math.max(rounds.length - 1, 0))] || { miniGames: ["trivia"], trivia: { topicCount: 0, questionsPerTopic: 0, topics: [] }, associations: { puzzles: [] }, buildacard: { rounds: [] }, connections: { rounds: [] } };
+    const md = { p1: m.p1, p2: m.p2, scores: { [m.p1]: 0, [m.p2]: 0 }, board: buildBoard(roundData.trivia, roundData.associations, roundData.buildacard, roundData.connections, roundData.miniGames || ["trivia"]), turn: m.p1, phase: "select_minigame", activeMinigame: null, completedMinigames: [], activeQ: null, roundMiniGames: roundData.miniGames || ["trivia"] };
     await onUpdate({ ...game, activeMatchId: matchId, subView: "match", matches: { ...matches, [matchId]: md } });
   };
 
@@ -1136,10 +1187,12 @@ function MatchScreen({ game, onUpdate }) {
   const [timerLeft, setTimerLeft] = useState(null);
   const [timerRunning, setTimerRunning] = useState(false);
   const [assocPoints, setAssocPoints] = useState(100);
+  const [answerRevealed, setAnswerRevealed] = useState(false);
 
   // Reset timer and assocPoints whenever a new question is selected
   useEffect(() => {
     setTimerLeft(null); setTimerRunning(false);
+    setAnswerRevealed(false);
     if (aq?.type === "assoc") setAssocPoints(100);
   }, [activeQ]);
   useEffect(() => { if (phase === "steal") { setTimerLeft(null); setTimerRunning(false); } }, [phase]);
@@ -1208,7 +1261,7 @@ function MatchScreen({ game, onUpdate }) {
   const allDone = b => b.every(t => t.qs.every(q => q.done));
 
   const minigameDone = (mg, b) => {
-    const colType = mg === "trivia" ? "trivia" : mg === "associations" ? "assoc" : "buildacard";
+    const colType = mg === "trivia" ? "trivia" : mg === "associations" ? "assoc" : mg === "buildacard" ? "buildacard" : "connections";
     return b.filter(c => c.type === colType).every(c => c.qs.every(q => q.done));
   };
 
@@ -1311,7 +1364,7 @@ function MatchScreen({ game, onUpdate }) {
               {(roundMiniGames||[]).filter(mg=>!(completedMinigames||[]).includes(mg)).map(mg=>(
                 <button key={mg} onClick={()=>upd({phase:"picking", activeMinigame:mg, activeQ:null})}
                   style={{ padding:"22px 40px", borderRadius:12, border:"2px solid var(--gold)", background:"rgba(245,197,24,.08)", color:"var(--gold)", fontWeight:900, fontSize:20, cursor:"pointer", fontFamily:"'Barlow Condensed',sans-serif", letterSpacing:1, textTransform:"uppercase", transition:"background .15s" }}>
-                  {mg === "trivia" ? "❓ Trivia" : mg === "associations" ? "🔗 Associations" : "🃏 Build a Card"}
+                  {mg === "trivia" ? "❓ Trivia" : mg === "associations" ? "🔗 Associations" : mg === "buildacard" ? "🃏 Build-a-Card" : "🔀 Connections"}
                 </button>
               ))}
             </div>
@@ -1363,15 +1416,34 @@ function MatchScreen({ game, onUpdate }) {
             onStealCorrect={()=>stealResult(true)} onStealWrong={()=>stealResult(false)}
             onCancel={cancelQ}
           />
+        ) : aq?.type === "connections" ? (
+          /* ── Connections game ── */
+          <ConnectionsGame
+            aq={aq} turnP={turnP} phase={phase}
+            onUpdateQ={async patch => {
+              const nb = board.map((t,ti)=>({...t,qs:t.qs.map((q,qi)=>ti===activeQ.ti&&qi===activeQ.qi?{...q,...patch}:q)}));
+              await upd({ board: nb });
+            }}
+            onAwardPoints={async pts => {
+              const ns = {...scores, [turn]: (scores[turn]||0)+pts};
+              await upd({ scores: ns });
+            }}
+            onFinish={async () => {
+              const nb = board.map((t,ti)=>({...t,qs:t.qs.map((q,qi)=>ti===activeQ.ti&&qi===activeQ.qi?{...q,done:true}:q)}));
+              if (minigameDone("connections", nb)) await endMatch(scores, nb);
+              else await upd({ phase:"picking", activeQ:null, board:nb });
+            }}
+          />
         ) : (
-          /* ── Jeopardy board ── */
           <>
-            <div className="board-area">
+            {/* Board area — darkens when question is active */}
+            <div className="board-area" style={{ position: "relative" }}>
               <div className="board-wrap">
                 <div className="board">
                   {board.filter(col => {
                     if (activeMinigame === "associations") return col.type === "assoc";
                     if (activeMinigame === "buildacard") return col.type === "buildacard";
+                    if (activeMinigame === "connections") return col.type === "connections";
                     return col.type === "trivia";
                   }).map((topic, ti) => {
                     const realTi = board.indexOf(topic);
@@ -1379,7 +1451,7 @@ function MatchScreen({ game, onUpdate }) {
                       <div key={realTi} className="board-col">
                         <div className="board-head" style={{
                           fontSize: 13, fontWeight: 900,
-                          ...(topic.type === "assoc" ? { background: "#2a0870", borderColor: "#6030c0" } : topic.type === "buildacard" ? { background: "#0a2840", borderColor: "#1a6090" } : {})
+                          ...(topic.type === "assoc" ? { background: "#2a0870", borderColor: "#6030c0" } : topic.type === "buildacard" ? { background: "#0a2840", borderColor: "#1a6090" } : topic.type === "connections" ? { background: "#0a2818", borderColor: "#1a6040" } : {})
                         }}>
                           {topic.name || `Topic ${realTi + 1}`}
                         </div>
@@ -1387,11 +1459,12 @@ function MatchScreen({ game, onUpdate }) {
                           const canClick = !q.done && phase === "picking";
                           const isAssoc = q.type === "assoc";
                           const isBac = q.type === "buildacard";
-                          const label = isAssoc ? `Round ${qi + 1}` : isBac ? `#${qi + 1} Card` : q.points;
+                          const isConn = q.type === "connections";
+                          const label = isAssoc ? `Round ${qi + 1}` : isBac ? `#${qi + 1} Card` : isConn ? `Round ${qi + 1}` : q.points;
                           return (
                             <div key={q.id}
                               className={`board-cell${q.done ? " used" : canClick ? ` avail${isAssoc ? " assoc-cell" : ""}` : " locked"}`}
-                              style={{ fontSize: (isAssoc || isBac) ? 14 : undefined, fontWeight: (isAssoc || isBac) ? 700 : undefined }}
+                              style={{ fontSize: (isAssoc || isBac || isConn) ? 14 : undefined, fontWeight: (isAssoc || isBac || isConn) ? 700 : undefined }}
                               onClick={() => canClick && upd({ phase: "answering", activeQ: { ti: realTi, qi } })}>
                               {!q.done && label}
                             </div>
@@ -1402,8 +1475,71 @@ function MatchScreen({ game, onUpdate }) {
                   })}
                 </div>
               </div>
+
+              {/* Overlay — appears when trivia question is active */}
+              {aq && aq.type !== "assoc" && aq.type !== "buildacard" && aq.type !== "connections" && (
+                <div style={{
+                  position: "absolute", inset: 0,
+                  background: "rgba(3,8,42,0.88)",
+                  display: "flex", alignItems: "center", justifyContent: "center",
+                  zIndex: 20, padding: 24,
+                }}>
+                  <div style={{
+                    background: "#0a1545", border: "2px solid #2d42a0",
+                    borderRadius: 14, padding: 28, maxWidth: 580, width: "100%",
+                    boxShadow: "0 8px 40px rgba(0,0,0,0.6)",
+                  }}>
+                    {/* Category + points */}
+                    <div style={{ fontSize: 11, color: "var(--muted)", fontWeight: 700, textTransform: "uppercase", letterSpacing: ".7px", marginBottom: 12 }}>
+                      {board[activeQ.ti].name} — <span style={{ color: "var(--gold)" }}>{aq.points} pts</span>
+                    </div>
+
+                    {/* Image */}
+                    {aqImageUrl && (
+                      <div style={{ marginBottom: 16, textAlign: "center" }}>
+                        <img src={aqImageUrl} alt="question"
+                          style={{ maxWidth: "100%", maxHeight: 200, borderRadius: 8, objectFit: "contain", cursor: "pointer" }}
+                          onClick={() => window.open(aqImageUrl, "_blank")}
+                          onError={e => { e.target.style.display = "none"; }} />
+                      </div>
+                    )}
+
+                    {/* Question */}
+                    <div style={{
+                      fontSize: "clamp(16px, 2.2vw, 24px)", fontWeight: 800,
+                      color: "#fff", lineHeight: 1.4, marginBottom: 24,
+                      textAlign: "center",
+                    }}>
+                      {aq.text || "(no question text)"}
+                    </div>
+
+                    {/* Answer field */}
+                    <div
+                      onClick={() => setAnswerRevealed(r => !r)}
+                      style={{
+                        background: answerRevealed ? "rgba(74,222,128,0.1)" : "rgba(255,255,255,0.04)",
+                        border: `2px solid ${answerRevealed ? "#4ade80" : "rgba(255,255,255,0.15)"}`,
+                        borderRadius: 10, padding: "14px 20px",
+                        textAlign: "center", cursor: "pointer",
+                        transition: "all .25s",
+                        minHeight: 52, display: "flex", alignItems: "center", justifyContent: "center",
+                      }}>
+                      {answerRevealed ? (
+                        <span style={{ fontSize: 18, fontWeight: 800, color: "#4ade80" }}>
+                          {aq.answer || "(no answer set)"}
+                        </span>
+                      ) : (
+                        <span style={{ fontSize: 13, color: "rgba(255,255,255,0.35)", fontWeight: 600 }}>
+                          Click to reveal answer
+                        </span>
+                      )}
+                    </div>
+                  </div>
+                </div>
+              )}
             </div>
 
+            {/* Right panel — timer + correct/wrong only */}
             <div className="ctrl-panel">
               {!aq ? (
                 <div className="wait-panel">
@@ -1413,30 +1549,8 @@ function MatchScreen({ game, onUpdate }) {
                 </div>
               ) : (
             <>
-              <div className="q-display">
-                <div className="q-meta">
-                  <span>{board[activeQ.ti].name} — <span style={{ color: "var(--gold)" }}>{aq.points} pts</span></span>
-                  {phase === "answering" && (
-                    <button onClick={cancelQ} style={{ background: "none", color: "var(--muted)", fontSize: 13, padding: "1px 5px" }}>✕</button>
-                  )}
-                </div>
-                {aqImageUrl && (
-                  <div style={{ marginBottom: 8 }}>
-                    <img src={aqImageUrl} alt="question"
-                      style={{ width: "100%", maxHeight: 160, borderRadius: 6, objectFit: "contain", cursor: "pointer", display: "block" }}
-                      onClick={() => window.open(aqImageUrl, "_blank")}
-                      onError={e => { e.target.style.display = "none"; }}
-                    />
-                    <div style={{ textAlign: "center", marginTop: 4 }}>
-                      <a href={aqImageUrl} target="_blank" rel="noreferrer" style={{ fontSize: 10, color: "var(--gold)", textDecoration: "none" }}>
-                        Open full size ↗
-                      </a>
-                    </div>
-                  </div>
-                )}
-                <div className="q-text">{aq.text || "(no question text)"}</div>
-              </div>
-
+              {/* Cancel button */}
+              <button onClick={cancelQ} style={{ background:"none", color:"var(--muted)", fontSize:12, padding:"2px 6px", border:"1px solid var(--border)", borderRadius:5, marginBottom:8, alignSelf:"flex-end" }}>✕ Cancel</button>
               <hr className="divider" />
 
               {phase === "answering" && (
@@ -1621,6 +1735,16 @@ function AssociationsPanel({ aq, turnP, otherP, phase, assocPoints, onAssocPoint
 // Proof: stepY = AY/N = 35/7 = 5 > CELL_H = 4. ✓
 // Horizontally: consecutive branch cells share x-range but NOT y-range → no overlap.
 // Between branches (e.g. A vs C same x, different y): gap = 2*CY - CELL_H > 0. ✓
+// ─── Association Tree View ────────────────────────────────────────────────────
+// Math proof of no overlap:
+//   stepY = AY/N  |  cellH = stepY * 0.82
+//   Adjacent cells differ by stepY in Y → step_Y > cellH → no Y overlap → no overlap.
+//   Cell width (17%) can exceed stepX safely because Y ranges don't overlap.
+//   All cells fit: outermost at CX + (N-0.5)*stepX ≤ CX + AX = 50% ✓
+// ─── Association Tree View ────────────────────────────────────────────────────
+// All cells identical size — determined by the longest word across all branches.
+// Technique: invisible "sizer" span with longestWord in every cell → all cells
+// always exactly the same width, before AND after reveal. No layout shifts.
 function AssociationTreeView({ puzzle, onRevealCell, onRevealCenter }) {
   const DIRS   = [{ dx:-1, dy:-1 }, { dx:1, dy:-1 }, { dx:-1, dy:1 }, { dx:1, dy:1 }];
   const LABELS = ["A", "B", "C", "D"];
@@ -1630,96 +1754,116 @@ function AssociationTreeView({ puzzle, onRevealCell, onRevealCenter }) {
   const centerRevealed = !!puzzle.centerRevealed;
   const canReveal    = !!onRevealCell;
 
-  // Dark blue palette
-  const BG       = "#03082a";
-  const CELL_BG  = "#0a1550";
-  const BORDER_H = "#4a7aff";   // revealed border
-  const BORDER_L = "rgba(74,122,255,0.3)"; // hidden border
-  const TEXT_C   = "#e8f0ff";   // revealed text
-  const LABEL_C  = "rgba(180,200,255,0.55)";
+  // Longest word across all branches + center → sets uniform width
+  const allWords = branches.flatMap(b => b).concat([puzzle.answer || ""]);
+  const longestWord = allWords.reduce((a, b) => a.length > b.length ? a : b, "xxxxxxxx");
 
-  const CENTER_W = 20, CENTER_H = 10;
-  const CX = 13, CY = 4;
-  const AX = 29, AY = 35;
-  const CELL_H_PCT = 7.5; // cell height % — stepY > CELL_H guaranteed for n≤7
+  // Palette
+  const BG       = "#03082a";
+  const CELL_BG  = "#0d1d50";
+  const CTR_BG   = "#142060";
+  const BORDER_H = "#5a8aff";
+  const BORDER_L = "rgba(90,138,255,0.28)";
+  const BORDER_C = "#7aa0ff";
+  const TEXT_C   = "#dce8ff";
+  const LABEL_C  = "rgba(180,210,255,0.55)";
+
+  const FONT = 15;
+  const FONT_BIG = 19; // center is slightly bigger
+  const FONT_W = 900;
+  const PX = "14px";  // horizontal padding
+  const PY = "8px";   // vertical padding
+
+  // Positioning
+  const CX = 12, CY = 7;
+  const AX = 27, AY = 36;
+
+  // Renders a cell: invisible sizer (longestWord) + actual word on top
+  const Cell = ({ word, isRevealed, isCenter, onClick: handleClick, style: extraStyle = {} }) => {
+    const fs = isCenter ? FONT_BIG : FONT;
+    return (
+      <div
+        onClick={handleClick}
+        style={{
+          position: "relative",
+          display: "inline-flex",
+          alignItems: "center",
+          justifyContent: "center",
+          padding: `${PY} ${PX}`,
+          background: isRevealed ? (isCenter ? CTR_BG : CELL_BG) : BG,
+          border: `${isCenter ? 3 : 2}px solid ${isRevealed ? (isCenter ? BORDER_C : BORDER_H) : BORDER_L}`,
+          borderRadius: 5,
+          cursor: handleClick ? "pointer" : "default",
+          transition: "border-color .25s, background .25s",
+          boxShadow: isCenter && isRevealed ? "0 0 24px rgba(90,138,255,0.4)" : isRevealed ? "0 0 8px rgba(90,138,255,0.15)" : "none",
+          whiteSpace: "nowrap",
+          ...extraStyle,
+        }}>
+        {/* Invisible sizer — always longestWord → uniform width */}
+        <span style={{ opacity: 0, fontSize: fs, fontWeight: FONT_W, whiteSpace: "nowrap", pointerEvents: "none", userSelect: "none" }}>
+          {longestWord}
+        </span>
+        {/* Actual word — transparent until revealed */}
+        <span style={{
+          position: "absolute", left: "50%", top: "50%",
+          transform: "translate(-50%,-50%)",
+          fontSize: fs, fontWeight: FONT_W, whiteSpace: "nowrap",
+          color: isRevealed ? TEXT_C : "transparent",
+          transition: "color .25s",
+        }}>
+          {word || ""}
+        </span>
+      </div>
+    );
+  };
 
   return (
     <div style={{ width:"100%", height:"100%", background:BG, position:"relative", overflow:"hidden" }}>
 
       {/* Center */}
-      <div
-        onClick={() => !centerRevealed && onRevealCenter && onRevealCenter()}
-        style={{
-          position:"absolute", left:"50%", top:"50%",
-          transform:"translate(-50%,-50%)",
-          background: centerRevealed ? CELL_BG : BG,
-          border:`3px solid ${centerRevealed ? BORDER_H : BORDER_L}`,
-          minWidth:`${CENTER_W}%`, width:"auto", height:`${CENTER_H}%`,
-          display:"flex", alignItems:"center", justifyContent:"center",
-          fontSize:"clamp(13px,2vw,26px)", fontWeight:900,
-          color: centerRevealed ? TEXT_C : "transparent",
-          zIndex:10,
-          cursor: !centerRevealed && onRevealCenter ? "pointer" : "default",
-          transition:"color .25s, border-color .25s, background .25s",
-          overflow:"visible", whiteSpace:"nowrap",
-          padding:"0 18px",
-          borderRadius:4,
-          boxShadow: centerRevealed ? `0 0 20px rgba(74,122,255,0.25)` : "none",
-        }}>
-        {puzzle.answer || "\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0"}
-      </div>
+      <Cell
+        word={puzzle.answer || ""}
+        isRevealed={centerRevealed}
+        isCenter
+        onClick={!centerRevealed && onRevealCenter ? onRevealCenter : null}
+        style={{ position:"absolute", left:"50%", top:"50%", transform:"translate(-50%,-50%)", zIndex:10 }}
+      />
 
+      {/* Branch words */}
       {branches.map((words, bi) => {
         const dir   = DIRS[bi]   || DIRS[0];
         const label = LABELS[bi] || String.fromCharCode(65 + bi);
         const n     = words.length;
         if (!n) return null;
 
-        const stepX = AX / n;
-        const stepY = AY / n;
-        const baseFontSize = Math.max(14, Math.min(22, Math.round(stepX * 2.0)));
+        const stepX  = AX / n;
+        const stepY  = AY / n;
+        const cellHPct = stepY * 0.82; // < stepY → no vertical overlap
 
         return words.map((word, wi) => {
-          const key        = `${bi}-${wi}`;
-          const isRevealed = revealed.has(key);
-          const stepsOut   = n - 1 - wi;
-          const cellLabel  = `${label}${wi + 1}`;
-
+          const key      = `${bi}-${wi}`;
+          const isRev    = revealed.has(key);
+          const stepsOut = n - 1 - wi;
+          const cellLabel = `${label}${wi + 1}`;
           const xOff = CX + (stepsOut + 0.5) * stepX;
           const yOff = CY + (stepsOut + 0.5) * stepY;
 
-          const t  = n > 1 ? stepsOut / (n - 1) : 0;
-          const fs = Math.round(baseFontSize - t * 4);
-
           return (
-            <div key={key} style={{ position:"absolute", left:`calc(50% + ${dir.dx * xOff}%)`, top:`calc(50% + ${dir.dy * yOff}%)`, transform:"translate(-50%,-50%)", zIndex:5, display:"flex", flexDirection:"column", alignItems:"center", gap:2 }}>
-              {/* Label ABOVE the cell */}
-              <div style={{ fontSize:Math.max(7, fs-5), color:LABEL_C, lineHeight:1, fontWeight:700, whiteSpace:"nowrap" }}>
-                {cellLabel}
-              </div>
-              {/* Cell: minWidth=17% so hidden cells look wide; after reveal width grows with text */}
-              <div
-                onClick={() => !isRevealed && canReveal && onRevealCell(bi, wi)}
-                style={{
-                  background: isRevealed ? CELL_BG : BG,
-                  border:`1.5px solid ${isRevealed ? BORDER_H : BORDER_L}`,
-                  minWidth: "17%",
-                  // Use table layout trick: shrinkwrap to content but never below minWidth
-                  width: "auto",
-                  height:`${CELL_H_PCT}%`,
-                  display:"flex", alignItems:"center", justifyContent:"center",
-                  overflow:"visible",
-                  whiteSpace:"nowrap",
-                  cursor: !isRevealed && canReveal ? "pointer" : "default",
-                  transition:"border-color .25s, background .25s",
-                  borderRadius:3,
-                  padding:"0 14px",
-                  boxShadow: isRevealed ? `0 0 10px rgba(74,122,255,0.2)` : "none",
-                }}>
-                <span style={{ fontSize:fs, fontWeight:800, color: isRevealed ? TEXT_C : "transparent", whiteSpace:"nowrap", display:"block" }}>
-                  {word || "\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0"}
-                </span>
-              </div>
+            <div key={key} style={{
+              position:"absolute",
+              left:`calc(50% + ${dir.dx * xOff}%)`,
+              top: `calc(50% + ${dir.dy * yOff}%)`,
+              transform:"translate(-50%,-50%)",
+              zIndex:5,
+              display:"flex", flexDirection:"column", alignItems:"center", gap:3,
+            }}>
+              <Cell
+                word={word}
+                isRevealed={isRev}
+                isCenter={false}
+                onClick={!isRev && canReveal ? () => onRevealCell(bi, wi) : null}
+                style={{ height:`${cellHPct}%` }}
+              />
             </div>
           );
         });
@@ -1728,186 +1872,163 @@ function AssociationTreeView({ puzzle, onRevealCell, onRevealCenter }) {
   );
 }
 
-// ─── Build a Card Game ────────────────────────────────────────────────────────
-function BuildACardGame({ aq, turnP, otherP, phase, onAssign, onCorrect, onWrong, onSteal, onSkipSteal, onStealCorrect, onStealWrong, onCancel }) {
-  const [selected, setSelected] = useState(null); // { type:'number'|'keyword', idx:number }
-  const assigned = aq.assigned || { mana: null, attack: null, health: null, keywords: [] };
-  const numbers = aq.numbers || [];
-  const keywords = aq.keywords || [];
-  const half = Math.floor((aq.points || 500) / 2);
+// ─── Connections Editor ────────────────────────────────────────────────────────
+function ConnectionsEditor({ conn, onChange }) {
+  const [ai, setAi] = useState(0);
+  const rounds = conn.rounds || [];
+  const freshConnRound = () => ({ id: uid(), pairCount: 5, pairs: Array.from({length:5},()=>({id:uid(),a:"",b:""})) });
 
-  const usedNumIndices = new Set([assigned.mana, assigned.attack, assigned.health].filter(v => v !== null));
+  const addRound = () => { onChange({...conn, rounds:[...rounds, freshConnRound()]}); setAi(rounds.length); };
+  const removeRound = id => { onChange({...conn, rounds:rounds.filter(r=>r.id!==id)}); setAi(0); };
+  const updRound = (id, patch) => onChange({...conn, rounds:rounds.map(r=>r.id!==id?r:{...r,...patch})});
 
-  const selectNum = (idx) => {
-    if (usedNumIndices.has(idx)) return; // can't select already-placed numbers
-    setSelected(selected?.type === "number" && selected.idx === idx ? null : { type: "number", idx });
+  const setPairCount = (id, n) => {
+    const r = rounds.find(x=>x.id===id);
+    let pairs = [...r.pairs];
+    while (pairs.length < n) pairs.push({id:uid(),a:"",b:""});
+    pairs = pairs.slice(0,n);
+    updRound(id, {pairCount:n, pairs});
   };
-  const selectKw = (idx) => {
-    if ((assigned.keywords || []).includes(idx)) return;
-    setSelected(selected?.type === "keyword" && selected.idx === idx ? null : { type: "keyword", idx });
+  const setPairWord = (rid, pid, field, val) => {
+    const r = rounds.find(x=>x.id===rid);
+    updRound(rid, {pairs: r.pairs.map(p=>p.id!==pid?p:{...p,[field]:val})});
   };
 
-  const clickSlot = async (slot) => {
+  const idx = Math.min(ai, Math.max(0, rounds.length-1));
+  const cur = rounds[idx];
+
+  return (
+    <Card>
+      <div className="row gap2" style={{marginBottom:14}}>
+        <SectionLabel style={{margin:0,flex:1}}>Connections — Rounds</SectionLabel>
+        <Btn size="sm" onClick={addRound}>+ Add Round</Btn>
+      </div>
+      {rounds.length===0 && <div className="muted" style={{textAlign:"center",padding:"20px 0",fontSize:13}}>No rounds yet — click "Add Round".</div>}
+      {rounds.length>0 && <>
+        <div className="row gap2 wrap" style={{marginBottom:14}}>
+          {rounds.map((r,i)=>(
+            <button key={r.id} onClick={()=>setAi(i)} className={`topic-tab${i===idx?" on":""}`}>Round {i+1}</button>
+          ))}
+        </div>
+        {cur && (
+          <div className="q-editor fade">
+            <div className="row gap3 wrap" style={{marginBottom:14,alignItems:"center"}}>
+              <div>
+                <label style={{fontSize:11,color:"var(--muted)",fontWeight:600,display:"block",marginBottom:5}}>Pairs per round</label>
+                <select value={cur.pairCount||5} onChange={e=>setPairCount(cur.id,+e.target.value)}>
+                  {[2,3,4,5,6,7,8].map(n=><option key={n} value={n}>{n}</option>)}
+                </select>
+              </div>
+              <Btn variant="ghost" size="sm" style={{color:"#f87171",marginTop:20}} onClick={()=>removeRound(cur.id)}>🗑 Delete</Btn>
+            </div>
+            <div className="row gap2" style={{marginBottom:8}}>
+              <div style={{flex:1,fontSize:11,color:"var(--muted)",fontWeight:700,textAlign:"center"}}>Column A</div>
+              <div style={{flex:1,fontSize:11,color:"var(--muted)",fontWeight:700,textAlign:"center"}}>Column B (matches A)</div>
+            </div>
+            <div className="stack" style={{gap:8}}>
+              {(cur.pairs||[]).map((p,pi)=>(
+                <div key={p.id} className="row gap2">
+                  <span className="muted" style={{fontSize:11,minWidth:20,textAlign:"right"}}>{pi+1}.</span>
+                  <input type="text" value={p.a} onChange={e=>setPairWord(cur.id,p.id,"a",e.target.value)} placeholder={`A${pi+1}`} style={{flex:1}} />
+                  <span className="muted" style={{fontSize:16}}>↔</span>
+                  <input type="text" value={p.b} onChange={e=>setPairWord(cur.id,p.id,"b",e.target.value)} placeholder={`B${pi+1}`} style={{flex:1}} />
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+      </>}
+    </Card>
+  );
+}
+
+// ─── Connections Game ──────────────────────────────────────────────────────────
+function ConnectionsGame({ aq, turnP, phase, onUpdateQ, onAwardPoints, onFinish }) {
+  const [ptsInput, setPtsInput] = useState("");
+  const [flash, setFlash] = useState(null);
+
+  const { pairs, colA, colB, matched, selectedA } = aq;
+  const matchedSet = new Set(matched || []);
+  const allMatched = matchedSet.size === (pairs||[]).length;
+
+  const clickA = async (pairId) => {
     if (phase !== "answering") return;
-    if (slot === "mana" || slot === "attack" || slot === "health") {
-      if (selected?.type === "number") {
-        await onAssign(slot, selected.idx);
-        setSelected(null);
-      } else if (assigned[slot] !== null) {
-        // Unassign existing value
-        await onAssign(slot, null);
-      }
-    } else if (slot === "keyword") {
-      if (selected?.type === "keyword") {
-        await onAssign("keyword_add", selected.idx);
-        setSelected(null);
-      }
+    if (matchedSet.has(pairId)) return;
+    await onUpdateQ({ selectedA: selectedA === pairId ? null : pairId });
+  };
+
+  const clickB = async (pairId) => {
+    if (phase !== "answering" || !selectedA) return;
+    if (matchedSet.has(pairId)) return;
+    const correct = pairId === selectedA;
+    setFlash({ pairId: selectedA, bPairId: pairId, correct });
+    setTimeout(() => setFlash(null), 1000);
+    if (correct) {
+      await onUpdateQ({ matched: [...(matched||[]), pairId], selectedA: null });
+    } else {
+      await onUpdateQ({ selectedA: null });
     }
   };
 
-  const removeKw = async (kwIdx) => {
-    if (phase !== "answering") return;
-    const pos = (assigned.keywords || []).indexOf(kwIdx);
-    if (pos >= 0) await onAssign("keyword_remove", pos);
+  const awardPts = async () => {
+    const pts = parseInt(ptsInput) || 0;
+    if (pts > 0) await onAwardPoints(pts);
+    setPtsInput("");
   };
 
-  const reset = async () => { setSelected(null); await onAssign("reset", null); };
+  const MATCH_COLORS = ["#22c55e","#3b82f6","#a855f7","#f97316","#ec4899","#eab308","#14b8a6","#ef4444"];
+  const getMatchColor = (pairId) => { const idx = (matched||[]).indexOf(pairId); return idx >= 0 ? MATCH_COLORS[idx % MATCH_COLORS.length] : null; };
 
-  const slotStyle = (active, filled) => ({
-    background: filled ? "#0a2840" : active ? "rgba(74,158,255,0.12)" : "rgba(255,255,255,0.04)",
-    border: `2px solid ${active ? "#4a9eff" : filled ? "#4a9eff" : "rgba(255,255,255,0.2)"}`,
-    cursor: phase === "answering" ? "pointer" : "default",
-    display: "flex", alignItems: "center", justifyContent: "center",
-    borderRadius: 6, transition: "all .2s",
-    color: filled ? "#e8f4ff" : "rgba(255,255,255,0.3)",
-    fontWeight: 800, fontFamily: "'Barlow Condensed',sans-serif",
-  });
-
-  const canClickSlot = (slot) => phase === "answering" && (selected?.type === "number" || assigned[slot] !== null);
-  const canClickKw = () => phase === "answering" && selected?.type === "keyword";
+  const wordBtn = (pairId, word, side, isSelected, isMatched, matchColor, flashObj) => {
+    let bg = "var(--surf2)", border = "var(--border)", color = "var(--text)", cursor = "pointer";
+    if (isMatched) { bg = `${matchColor}22`; border = matchColor; color = matchColor; cursor = "default"; }
+    else if (isSelected) { bg = "rgba(245,197,24,.15)"; border = "var(--gold)"; color = "var(--gold)"; }
+    else if (flashObj && !flashObj.correct) { bg = "rgba(239,68,68,.15)"; border = "#ef4444"; color = "#ef4444"; }
+    else if (flashObj && flashObj.correct) { bg = "rgba(34,197,94,.15)"; border = "#22c55e"; color = "#22c55e"; }
+    const onClick = side === "A" ? () => clickA(pairId) : () => clickB(pairId);
+    return (
+      <button key={pairId} onClick={onClick}
+        style={{ width:"100%", padding:"12px 16px", borderRadius:8, fontWeight:700, fontSize:15, background:bg, border:`2px solid ${border}`, color, cursor, transition:"all .2s", textAlign:"center", marginBottom:8 }}>
+        {word}{isMatched && <span style={{marginLeft:8,fontSize:11,opacity:.7}}>✓</span>}
+      </button>
+    );
+  };
 
   return (
-    <div style={{ flex: 1, display: "flex", overflow: "hidden" }}>
-      {/* Card display area */}
-      <div style={{ flex: 1, display: "flex", alignItems: "center", justifyContent: "center", padding: 20, background: "#03082a" }}>
-        {/* Card */}
-        <div style={{ position: "relative", width: "min(340px, 48%)", aspectRatio: "0.72", background: "linear-gradient(160deg,#0d1f3c,#061228)", border: "2px solid #2a4a7a", borderRadius: 12, boxShadow: "0 8px 40px rgba(0,0,50,0.8)", overflow: "hidden" }}>
-
-          {/* Mana cost — top-left */}
-          <div onClick={() => clickSlot("mana")}
-            style={{ ...slotStyle(canClickSlot("mana") && !assigned.mana, assigned.mana !== null), position: "absolute", top: 10, left: 10, width: 48, height: 48, borderRadius: "50%", fontSize: 22 }}>
-            {assigned.mana !== null ? numbers[assigned.mana] : "?"}
-          </div>
-
-          {/* Keyword area — below center */}
-          <div onClick={() => clickSlot("keyword")}
-            style={{ ...slotStyle(canClickKw(), (assigned.keywords||[]).length > 0), position: "absolute", left: "10%", right: "10%", top: "52%", minHeight: 44, flexDirection: "column", gap: 4, padding: "6px 10px", flexWrap: "wrap" }}>
-            {(assigned.keywords || []).length === 0 ? (
-              <span style={{ fontSize: 12 }}>KEYWORD</span>
-            ) : (
-              <div style={{ display: "flex", flexWrap: "wrap", gap: 4 }}>
-                {(assigned.keywords || []).map((ki, pos) => (
-                  <span key={pos} onClick={e => { e.stopPropagation(); removeKw(ki); }}
-                    style={{ background: "rgba(74,158,255,0.2)", border: "1px solid #4a9eff", borderRadius: 4, padding: "1px 8px", fontSize: 12, fontWeight: 700, color: "#a8d8ff", cursor: "pointer" }}>
-                    {keywords[ki]} ✕
-                  </span>
-                ))}
-              </div>
-            )}
-          </div>
-
-          {/* Attack — bottom-left */}
-          <div onClick={() => clickSlot("attack")}
-            style={{ ...slotStyle(canClickSlot("attack") && !assigned.attack, assigned.attack !== null), position: "absolute", bottom: 12, left: 12, width: 52, height: 52, borderRadius: 8, fontSize: 24 }}>
-            {assigned.attack !== null ? numbers[assigned.attack] : "?"}
-          </div>
-
-          {/* Health — bottom-right */}
-          <div onClick={() => clickSlot("health")}
-            style={{ ...slotStyle(canClickSlot("health") && !assigned.health, assigned.health !== null), position: "absolute", bottom: 12, right: 12, width: 52, height: 52, borderRadius: 8, fontSize: 24 }}>
-            {assigned.health !== null ? numbers[assigned.health] : "?"}
-          </div>
-
-          {/* Inner glow overlay */}
-          <div style={{ position: "absolute", inset: 0, background: "radial-gradient(ellipse at 50% 30%, rgba(74,122,255,0.04) 0%, transparent 70%)", pointerEvents: "none" }} />
+    <div style={{flex:1,display:"flex",overflow:"hidden"}}>
+      <div style={{flex:1,padding:20,display:"flex",gap:16,overflow:"auto"}}>
+        <div style={{flex:1}}>
+          <div style={{fontSize:11,fontWeight:700,color:"var(--muted)",textTransform:"uppercase",letterSpacing:1,marginBottom:12,textAlign:"center"}}>Column A</div>
+          {(colA||[]).map(({pairId,word})=>wordBtn(pairId,word,"A",selectedA===pairId,matchedSet.has(pairId),getMatchColor(pairId),flash&&flash.pairId===pairId?flash:null))}
+        </div>
+        <div style={{width:2,background:"var(--border)",flexShrink:0,borderRadius:2}}/>
+        <div style={{flex:1}}>
+          <div style={{fontSize:11,fontWeight:700,color:"var(--muted)",textTransform:"uppercase",letterSpacing:1,marginBottom:12,textAlign:"center"}}>Column B</div>
+          {(colB||[]).map(({pairId,word})=>wordBtn(pairId,word,"B",false,matchedSet.has(pairId),getMatchColor(pairId),flash&&flash.bPairId===pairId?flash:null))}
         </div>
       </div>
-
-      {/* Right control panel */}
-      <div className="ctrl-panel" style={{ minWidth: 280 }}>
-        <div style={{ fontSize: 10, color: "var(--muted)", fontWeight: 700, textTransform: "uppercase", letterSpacing: ".6px", marginBottom: 8 }}>
-          🃏 Build a Card {phase === "answering" ? `— ${turnP?.name}` : ""}
-        </div>
-        {phase === "answering" && (
-          <>
-            {/* Numbers pool */}
-            {numbers.length > 0 && (
-              <div style={{ marginBottom: 10 }}>
-                <div style={{ fontSize: 10, color: "var(--muted)", fontWeight: 700, marginBottom: 5 }}>NUMBERS — click then assign to slot</div>
-                <div className="row gap2 wrap">
-                  {numbers.map((n, i) => {
-                    const isUsed = usedNumIndices.has(i);
-                    const isSel = selected?.type === "number" && selected.idx === i;
-                    return (
-                      <button key={i} onClick={() => !isUsed && selectNum(i)}
-                        style={{ padding: "6px 14px", borderRadius: 8, fontWeight: 900, fontSize: 16, fontFamily: "'Barlow Condensed',sans-serif",
-                          background: isUsed ? "var(--surf3)" : isSel ? "var(--gold)" : "var(--surf2)",
-                          border: `1.5px solid ${isUsed ? "var(--dim)" : isSel ? "var(--gold)" : "var(--border)"}`,
-                          color: isUsed ? "var(--dim)" : isSel ? "#04091e" : "var(--text)",
-                          cursor: isUsed ? "default" : "pointer", opacity: isUsed ? .45 : 1,
-                          textDecoration: isUsed ? "line-through" : "none",
-                        }}>{n}</button>
-                    );
-                  })}
-                </div>
-              </div>
-            )}
-
-            {/* Keywords pool */}
-            {keywords.length > 0 && (
-              <div style={{ marginBottom: 10 }}>
-                <div style={{ fontSize: 10, color: "var(--muted)", fontWeight: 700, marginBottom: 5 }}>KEYWORDS — click then assign to keyword slot</div>
-                <div className="row gap2 wrap">
-                  {keywords.map((k, i) => {
-                    const isUsed = (assigned.keywords || []).includes(i);
-                    const isSel = selected?.type === "keyword" && selected.idx === i;
-                    return (
-                      <button key={i} onClick={() => !isUsed && selectKw(i)}
-                        style={{ padding: "5px 12px", borderRadius: 8, fontWeight: 700, fontSize: 13,
-                          background: isUsed ? "var(--surf3)" : isSel ? "var(--gold)" : "var(--surf2)",
-                          border: `1.5px solid ${isUsed ? "var(--dim)" : isSel ? "var(--gold)" : "var(--border)"}`,
-                          color: isUsed ? "var(--dim)" : isSel ? "#04091e" : "var(--text)",
-                          cursor: isUsed ? "default" : "pointer", opacity: isUsed ? .45 : 1,
-                        }}>{k}</button>
-                    );
-                  })}
-                </div>
-              </div>
-            )}
-
-            {selected && (
-              <div style={{ padding: "6px 10px", background: "rgba(245,197,24,.08)", border: "1px solid rgba(245,197,24,.3)", borderRadius: 6, marginBottom: 8, fontSize: 12, color: "var(--gold)", fontWeight: 700 }}>
-                Selected: {selected.type === "number" ? numbers[selected.idx] : keywords[selected.idx]} — now click a slot on the card
-              </div>
-            )}
-
-            <hr className="divider" />
-            <Btn variant="ghost" block size="sm" onClick={reset} style={{ marginBottom: 8 }}>↺ Reset Card</Btn>
-            <div style={{ marginBottom: 8 }}>
-              <div style={{ fontSize: 10, color: "var(--muted)", fontWeight: 700, textTransform: "uppercase", letterSpacing: ".6px", marginBottom: 5 }}>Points for correct answer</div>
-              <input type="text" inputMode="numeric" value={aq._pts ?? ""} placeholder="Enter points..."
-                onChange={e => {
-                  const clean = e.target.value.replace(/[^0-9]/g, "").replace(/^0+(\d)/, "$1");
-                  onAssign("_pts", clean === "" ? "" : parseInt(clean));
-                }}
-                style={{ textAlign: "center", fontWeight: 900, fontSize: 18 }} />
+      <div className="ctrl-panel">
+        <div style={{fontSize:10,color:"var(--muted)",fontWeight:700,textTransform:"uppercase",letterSpacing:".6px",marginBottom:8}}>🔀 Connections</div>
+        <div style={{fontSize:12,color:"var(--muted)",marginBottom:12}}>{matchedSet.size}/{(pairs||[]).length} pairs matched</div>
+        {phase==="answering" && <>
+          {selectedA ? (
+            <div style={{padding:"8px 12px",background:"rgba(245,197,24,.08)",border:"1px solid rgba(245,197,24,.3)",borderRadius:8,marginBottom:12,fontSize:12,color:"var(--gold)",fontWeight:700}}>
+              Selected: {(colA||[]).find(x=>x.pairId===selectedA)?.word} — click Column B
             </div>
-            <button className="ctrl-btn btn-green" onClick={onCorrect}>✓ Correct {(aq._pts||0) > 0 && <span style={{ fontWeight: 400, fontSize: 12, color: "#86efac" }}>+{aq._pts}</span>}</button>
-            <button className="ctrl-btn btn-red" onClick={onWrong} style={{ marginTop: 6 }}>✗ Wrong <span style={{ fontWeight: 400, fontSize: 12, color: "#fca5a5" }}>0 pts</span></button>
-          </>
-        )}
-        {phase === "steal_offer" && null}
-        {phase === "steal" && null}
+          ) : (
+            <div className="muted" style={{fontSize:12,marginBottom:12}}>{allMatched?"All pairs matched!":`${turnP?.name}: click Column A`}</div>
+          )}
+          <hr className="divider"/>
+          <div style={{fontSize:10,color:"var(--muted)",fontWeight:700,textTransform:"uppercase",letterSpacing:".6px",marginBottom:6}}>Award points</div>
+          <input type="text" inputMode="numeric" value={ptsInput} placeholder="Enter points..."
+            onChange={e=>{const c=e.target.value.replace(/[^0-9]/g,"").replace(/^0+(\d)/,"$1");setPtsInput(c);}}
+            style={{textAlign:"center",fontWeight:900,fontSize:18,marginBottom:8}}/>
+          <button className="ctrl-btn btn-green" onClick={awardPts} disabled={!ptsInput} style={{marginBottom:6}}>
+            ✓ Award {ptsInput?`+${ptsInput} pts`:""}
+          </button>
+          <hr className="divider"/>
+          <button className="ctrl-btn btn-ghost" onClick={onFinish}>{allMatched?"✓ Finish Round":"End Round Early"}</button>
+        </>}
       </div>
     </div>
   );
