@@ -34,8 +34,13 @@ const freshShow = () => ({
 
 const normaliseShow = show => {
   const rounds = show.rounds?.length
-    ? show.rounds.map(r => ({ buildacard: { rounds: [] }, connections: { rounds: [] }, miniGames: show.miniGames || ["trivia"], ...r }))
-    : [{ id: uid(), name: "Round 1", miniGames: show.miniGames || ["trivia"], trivia: show.trivia || freshRound().trivia, associations: show.associations || freshRound().associations, buildacard: { rounds: [] }, connections: { rounds: [] } }];
+    ? show.rounds.map(r => ({
+        buildacard: { rounds: [] }, connections: { rounds: [] },
+        ...r,
+        // Only use top-level miniGames as fallback if round has none
+        miniGames: r.miniGames?.length ? r.miniGames : ["trivia"],
+      }))
+    : [{ id: uid(), name: "Round 1", miniGames: ["trivia"], trivia: show.trivia || freshRound().trivia, associations: show.associations || freshRound().associations, buildacard: { rounds: [] }, connections: { rounds: [] } }];
   return { playerCount: 4, ...show, rounds };
 };
 
@@ -1388,7 +1393,16 @@ function MatchScreen({ game, onUpdate }) {
               <AssociationsPanel
                 aq={aq} turnP={turnP} otherP={otherP} phase={phase}
                 assocPoints={assocPoints} onAssocPointsChange={setAssocPoints}
-                onCorrect={correct} onWrong={wrong}
+                onAwardPoints={async pts => {
+                  const ns = { ...scores, [turn]: (scores[turn] || 0) + pts };
+                  await upd({ scores: ns });
+                }}
+                onFinish={async () => {
+                  const nb = markBoard();
+                  if (minigameDone("associations", nb)) await endMatch(scores, nb);
+                  else await upd({ phase: "picking", activeQ: null, board: nb });
+                }}
+                onWrong={wrong}
                 onSteal={() => upd({ phase: "steal" })} onSkipSteal={skipSteal}
                 onStealCorrect={() => stealResult(true)} onStealWrong={() => stealResult(false)}
                 onCancel={cancelQ}
@@ -1666,125 +1680,80 @@ function MatchScreen({ game, onUpdate }) {
 
 
 // ─── Associations Panel ────────────────────────────────────────────────────────
-function AssociationsPanel({ aq, turnP, otherP, phase, assocPoints, onAssocPointsChange, onCorrect, onWrong, onSteal, onSkipSteal, onStealCorrect, onStealWrong, onCancel }) {
+function AssociationsPanel({ aq, turnP, otherP, phase, assocPoints, onAssocPointsChange, onAwardPoints, onFinish, onWrong, onSteal, onSkipSteal, onStealCorrect, onStealWrong, onCancel }) {
   const half = Math.floor(assocPoints / 2);
-  const revealed = (aq.revealedCells || []).length;
-  const total = (aq.branches || []).reduce((a, b) => a + b.length, 0);
-
   return (
     <>
-      <div style={{ background: "#1a0640", border: "1px solid #5020a0", borderRadius: 10, padding: 12 }}>
-        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-          <span style={{ fontSize: 10, fontWeight: 700, color: "#9060d0", textTransform: "uppercase", letterSpacing: ".6px" }}>Associations</span>
-          {phase === "answering" && <button onClick={onCancel} style={{ background: "none", color: "var(--muted)", fontSize: 13, padding: "1px 5px" }}>✕</button>}
+      <div style={{ background:"#1a0640", border:"1px solid #5020a0", borderRadius:10, padding:12 }}>
+        <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center" }}>
+          <span style={{ fontSize:10, fontWeight:700, color:"#9060d0", textTransform:"uppercase", letterSpacing:".6px" }}>Associations</span>
+          {phase==="answering" && <button onClick={onCancel} style={{ background:"none", color:"var(--muted)", fontSize:13, padding:"1px 5px" }}>✕</button>}
         </div>
       </div>
       <hr className="divider" />
-      {phase === "answering" && (
-        <div className="stack" style={{ gap: 8 }}>
-          <div className="muted" style={{ fontSize: 11, textAlign: "center" }}>{turnP?.name} is answering…</div>
-          <div style={{ background: "var(--surf2)", border: "1px solid var(--border)", borderRadius: 8, padding: "10px 12px" }}>
-            <div style={{ fontSize: 10, color: "var(--muted)", fontWeight: 700, textTransform: "uppercase", letterSpacing: ".6px", marginBottom: 6 }}>
-              Award points
-            </div>
-            <input type="text" inputMode="numeric" value={assocPoints || ""}
-              placeholder="Enter points…"
-              onChange={e => {
-                const clean = e.target.value.replace(/[^0-9]/g, "").replace(/^0+(\d)/, "$1");
-                onAssocPointsChange(clean === "" ? 0 : parseInt(clean));
-              }}
-              style={{ textAlign: "center", fontWeight: 900, fontSize: 18, marginBottom: 8 }} />
-            <button className="ctrl-btn btn-green" onClick={onCorrect} style={{ width: "100%" }} disabled={!assocPoints}>
-              ✓ Award {assocPoints ? `+${assocPoints} pts` : ""}
+      {phase==="answering" && (
+        <div className="stack" style={{ gap:8 }}>
+          <div className="muted" style={{ fontSize:11, textAlign:"center" }}>{turnP?.name} is answering…</div>
+          <div style={{ background:"var(--surf2)", border:"1px solid var(--border)", borderRadius:8, padding:"10px 12px" }}>
+            <div style={{ fontSize:10, color:"var(--muted)", fontWeight:700, textTransform:"uppercase", letterSpacing:".6px", marginBottom:6 }}>Award points</div>
+            <input type="text" inputMode="numeric" value={assocPoints||""} placeholder="Enter points…"
+              onChange={e=>{const c=e.target.value.replace(/[^0-9]/g,"").replace(/^0+(\d)/,"$1");onAssocPointsChange(c===""?0:parseInt(c));}}
+              style={{ textAlign:"center", fontWeight:900, fontSize:18, marginBottom:8 }} />
+            <button className="ctrl-btn btn-green" onClick={()=>onAwardPoints(assocPoints)} disabled={!assocPoints} style={{ width:"100%" }}>
+              ✓ Award {assocPoints?`+${assocPoints} pts`:""}
             </button>
           </div>
-          <button className="ctrl-btn btn-red" onClick={onWrong}>
-            ✗ Wrong <span style={{ fontWeight: 400, fontSize: 12, color: "#fca5a5" }}>0 pts</span>
-          </button>
+          <hr className="divider" />
+          <button className="ctrl-btn btn-ghost" onClick={onFinish}>End Associations</button>
         </div>
       )}
-      {phase === "steal_offer" && (
-        <div className="stack" style={{ gap: 8 }}>
-          <div className="steal-box">
-            <div className="steal-title">⚡ Steal Available</div>
-            <div className="steal-info">{otherP?.name} — ±{half} pts</div>
-          </div>
+      {phase==="steal_offer" && (
+        <div className="stack" style={{ gap:8 }}>
+          <div className="steal-box"><div className="steal-title">⚡ Steal Available</div><div className="steal-info">{otherP?.name} — ±{half} pts</div></div>
           <button className="ctrl-btn btn-orange" onClick={onSteal}>Steal!</button>
           <button className="ctrl-btn btn-ghost" onClick={onSkipSteal}>Skip → Next Turn</button>
         </div>
       )}
-      {phase === "steal" && (
-        <div className="stack" style={{ gap: 8 }}>
-          <div className="muted" style={{ fontSize: 11, textAlign: "center", color: "#fb923c" }}>{otherP?.name} is stealing…</div>
-          <button className="ctrl-btn btn-green" onClick={onStealCorrect}>
-            ✓ Correct <span style={{ fontWeight: 400, fontSize: 12, color: "#86efac" }}>+{half}</span>
-          </button>
-          <button className="ctrl-btn btn-red" onClick={onStealWrong}>
-            ✗ Wrong <span style={{ fontWeight: 400, fontSize: 12, color: "#fca5a5" }}>−{half}</span>
-          </button>
+      {phase==="steal" && (
+        <div className="stack" style={{ gap:8 }}>
+          <div className="muted" style={{ fontSize:11, textAlign:"center", color:"#fb923c" }}>{otherP?.name} is stealing…</div>
+          <button className="ctrl-btn btn-green" onClick={onStealCorrect}>✓ Correct <span style={{ fontWeight:400, fontSize:12, color:"#86efac" }}>+{half}</span></button>
+          <button className="ctrl-btn btn-red" onClick={onStealWrong}>✗ Wrong <span style={{ fontWeight:400, fontSize:12, color:"#fca5a5" }}>−{half}</span></button>
         </div>
       )}
     </>
   );
 }
 
-// ─── Association Tree View ────────────────────────────────────────────────────
-// Labels: top-left=A, top-right=B, bottom-left=C, bottom-right=D
-// Numbers: 1 = outermost (furthest), N = innermost (closest to center)
-// Spacing auto-scales so all cells fit regardless of N
-// ─── Association Tree View ────────────────────────────────────────────────────
-// Positions are computed so everything always fits:
-//   - innermost cell starts just past the center cell edge
-//   - outermost cell ends near the screen corner
-//   - cell width scales so no horizontal overlap between adjacent cells
-// ─── Association Tree View ────────────────────────────────────────────────────
-// Excel-style tiling: N cells fill the space from center-edge to screen-edge
-// exactly. Width = availableX/N, Height = availableY/N. Always fits, never gaps.
-// ─── Association Tree View ────────────────────────────────────────────────────
-// Decoupled sizing: cell DISPLAY size is fixed, step size drives POSITION only.
-// No overlap guaranteed because stepY > CELL_H for any N ≤ 7 (max configured).
-// Proof: stepY = AY/N = 35/7 = 5 > CELL_H = 4. ✓
-// Horizontally: consecutive branch cells share x-range but NOT y-range → no overlap.
-// Between branches (e.g. A vs C same x, different y): gap = 2*CY - CELL_H > 0. ✓
-// ─── Association Tree View ────────────────────────────────────────────────────
-// Math proof of no overlap:
-//   stepY = AY/N  |  cellH = stepY * 0.82
-//   Adjacent cells differ by stepY in Y → step_Y > cellH → no Y overlap → no overlap.
-//   Cell width (17%) can exceed stepX safely because Y ranges don't overlap.
-//   All cells fit: outermost at CX + (N-0.5)*stepX ≤ CX + AX = 50% ✓
-// ─── Association Tree View ────────────────────────────────────────────────────
-// All cells identical size — determined by the longest word across all branches.
 // ─── Build a Card Game ────────────────────────────────────────────────────────
 function BuildACardGame({ aq, turnP, otherP, phase, onAssign, onAwardPoints, onFinish, onCancel }) {
   const [selected, setSelected] = useState(null);
   const assigned = aq.assigned || { mana: null, attack: null, health: null, keywords: [] };
   const numbers  = aq.numbers  || [];
   const keywords = aq.keywords || [];
-  const half = Math.floor((aq._pts || 0) / 2);
   const usedNumIndices = new Set([assigned.mana, assigned.attack, assigned.health].filter(v => v !== null));
 
-  const selectNum = (idx) => { if (usedNumIndices.has(idx)) return; setSelected(selected?.type==="number"&&selected.idx===idx?null:{type:"number",idx}); };
-  const selectKw  = (idx) => { if ((assigned.keywords||[]).includes(idx)) return; setSelected(selected?.type==="keyword"&&selected.idx===idx?null:{type:"keyword",idx}); };
-  const clickSlot = async (slot) => {
+  const selectNum = i => { if (usedNumIndices.has(i)) return; setSelected(selected?.type==="number"&&selected.idx===i?null:{type:"number",idx:i}); };
+  const selectKw  = i => { if ((assigned.keywords||[]).includes(i)) return; setSelected(selected?.type==="keyword"&&selected.idx===i?null:{type:"keyword",idx:i}); };
+  const clickSlot = async slot => {
     if (phase!=="answering") return;
     if (slot==="keyword") { if (selected?.type==="keyword"){await onAssign("keyword_add",selected.idx);setSelected(null);} }
     else { if (selected?.type==="number"){await onAssign(slot,selected.idx);setSelected(null);} else if(assigned[slot]!==null){await onAssign(slot,null);} }
   };
-  const removeKw = async (pos) => { if (phase!=="answering") return; await onAssign("keyword_remove",pos); };
+  const removeKw = async pos => { if (phase!=="answering") return; await onAssign("keyword_remove",pos); };
   const reset = async () => { setSelected(null); await onAssign("reset",null); };
-
-  const slotStyle = (active,filled) => ({ background:filled?"#0a2840":active?"rgba(74,158,255,0.12)":"rgba(255,255,255,0.04)", border:`2px solid ${active?"#4a9eff":filled?"#4a9eff":"rgba(255,255,255,0.2)"}`, cursor:phase==="answering"?"pointer":"default", display:"flex", alignItems:"center", justifyContent:"center", borderRadius:6, transition:"all .2s", color:filled?"#e8f4ff":"rgba(255,255,255,0.3)", fontWeight:800, fontFamily:"'Barlow Condensed',sans-serif" });
+  const Sl = (active,filled) => ({ background:filled?"#0a2840":active?"rgba(74,158,255,0.12)":"rgba(255,255,255,0.04)", border:`2px solid ${active?"#4a9eff":filled?"#4a9eff":"rgba(255,255,255,0.2)"}`, cursor:phase==="answering"?"pointer":"default", display:"flex", alignItems:"center", justifyContent:"center", borderRadius:6, transition:"all .2s", color:filled?"#e8f4ff":"rgba(255,255,255,0.3)", fontWeight:800, fontFamily:"'Barlow Condensed',sans-serif" });
 
   return (
     <div style={{flex:1,display:"flex",overflow:"hidden"}}>
       <div style={{flex:1,display:"flex",alignItems:"center",justifyContent:"center",padding:20,background:"#03082a"}}>
         <div style={{position:"relative",width:"min(340px,48%)",aspectRatio:"0.72",background:"linear-gradient(160deg,#0d1f3c,#061228)",border:"2px solid #2a4a7a",borderRadius:12,boxShadow:"0 8px 40px rgba(0,0,50,0.8)",overflow:"hidden"}}>
-          <div onClick={()=>clickSlot("mana")} style={{...slotStyle(phase==="answering"&&selected?.type==="number"&&assigned.mana===null,assigned.mana!==null),position:"absolute",top:10,left:10,width:48,height:48,borderRadius:"50%",fontSize:22}}>{assigned.mana!==null?numbers[assigned.mana]:"?"}</div>
-          <div onClick={()=>clickSlot("keyword")} style={{...slotStyle(phase==="answering"&&selected?.type==="keyword",(assigned.keywords||[]).length>0),position:"absolute",left:"10%",right:"10%",top:"52%",minHeight:44,flexDirection:"column",gap:4,padding:"6px 10px"}}>
+          <div onClick={()=>clickSlot("mana")} style={{...Sl(phase==="answering"&&selected?.type==="number"&&assigned.mana===null,assigned.mana!==null),position:"absolute",top:10,left:10,width:48,height:48,borderRadius:"50%",fontSize:22}}>{assigned.mana!==null?numbers[assigned.mana]:"?"}</div>
+          <div onClick={()=>clickSlot("keyword")} style={{...Sl(phase==="answering"&&selected?.type==="keyword",(assigned.keywords||[]).length>0),position:"absolute",left:"10%",right:"10%",top:"52%",minHeight:44,flexDirection:"column",gap:4,padding:"6px 10px"}}>
             {(assigned.keywords||[]).length===0?<span style={{fontSize:12}}>KEYWORD</span>:<div style={{display:"flex",flexWrap:"wrap",gap:4}}>{(assigned.keywords||[]).map((ki,pos)=><span key={pos} onClick={e=>{e.stopPropagation();removeKw(pos);}} style={{background:"rgba(74,158,255,0.2)",border:"1px solid #4a9eff",borderRadius:4,padding:"1px 8px",fontSize:12,fontWeight:700,color:"#a8d8ff",cursor:"pointer"}}>{keywords[ki]} ✕</span>)}</div>}
           </div>
-          <div onClick={()=>clickSlot("attack")} style={{...slotStyle(phase==="answering"&&selected?.type==="number"&&assigned.attack===null,assigned.attack!==null),position:"absolute",bottom:12,left:12,width:52,height:52,borderRadius:8,fontSize:24}}>{assigned.attack!==null?numbers[assigned.attack]:"?"}</div>
-          <div onClick={()=>clickSlot("health")} style={{...slotStyle(phase==="answering"&&selected?.type==="number"&&assigned.health===null,assigned.health!==null),position:"absolute",bottom:12,right:12,width:52,height:52,borderRadius:8,fontSize:24}}>{assigned.health!==null?numbers[assigned.health]:"?"}</div>
+          <div onClick={()=>clickSlot("attack")} style={{...Sl(phase==="answering"&&selected?.type==="number"&&assigned.attack===null,assigned.attack!==null),position:"absolute",bottom:12,left:12,width:52,height:52,borderRadius:8,fontSize:24}}>{assigned.attack!==null?numbers[assigned.attack]:"?"}</div>
+          <div onClick={()=>clickSlot("health")} style={{...Sl(phase==="answering"&&selected?.type==="number"&&assigned.health===null,assigned.health!==null),position:"absolute",bottom:12,right:12,width:52,height:52,borderRadius:8,fontSize:24}}>{assigned.health!==null?numbers[assigned.health]:"?"}</div>
         </div>
       </div>
       <div className="ctrl-panel" style={{minWidth:280}}>
@@ -1813,9 +1782,6 @@ function BuildACardGame({ aq, turnP, otherP, phase, onAssign, onAwardPoints, onF
   );
 }
 
-// ─── Association Tree View (sizer-based uniform cells) ────────────────────────
-// Technique: invisible "sizer" span with longestWord in every cell → all cells
-// always exactly the same width, before AND after reveal. No layout shifts.
 function AssociationTreeView({ puzzle, onRevealCell, onRevealCenter }) {
   const DIRS   = [{ dx:-1, dy:-1 }, { dx:1, dy:-1 }, { dx:-1, dy:1 }, { dx:1, dy:1 }];
   const LABELS = ["A", "B", "C", "D"];
@@ -2098,7 +2064,7 @@ function ConnectionsGame({ aq, turnP, phase, onUpdateQ, onAwardPoints, onFinish 
             ✓ Award {ptsInput?`+${ptsInput} pts`:""}
           </button>
           <hr className="divider"/>
-          <button className="ctrl-btn btn-ghost" onClick={onFinish}>{allMatched?"✓ Finish Round":"End Round Early"}</button>
+          <button className="ctrl-btn btn-ghost" onClick={onFinish}>{allMatched?"✓ End Connections":"End Connections"}</button>
         </>}
       </div>
     </div>
