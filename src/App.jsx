@@ -1095,9 +1095,9 @@ function BracketScreen({ game, onUpdate, onBack }) {
 
   const startMatch = async matchId => {
     const m = bracket.flat().find(x => x.id === matchId); if (!m) return;
-    // Flat index: count all matches in order across bracket rounds
-    let flatIdx = 0;
-    bracket.forEach(r => r.forEach(mm => { if (mm.id === matchId) return; flatIdx++; }));
+    // Flat index: position of this match across all bracket rounds in order
+    const allMatches = bracket.flat();
+    const flatIdx = allMatches.findIndex(mm => mm.id === matchId);
     // Each match maps to its own round (Semifinal 1 → rounds[0], Semifinal 2 → rounds[1], Final → rounds[2])
     const rounds = game.rounds || [];
     const roundData = rounds[Math.min(flatIdx, rounds.length - 1)] || { miniGames: ["trivia"], trivia: { topicCount: 0, questionsPerTopic: 0, topics: [] }, associations: { puzzles: [] }, buildacard: { rounds: [] }, connections: { rounds: [] } };
