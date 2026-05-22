@@ -111,6 +111,8 @@ function buildBoard(tr, assoc, bac, conn, miniGames) {
       return {
         id: r.id, type: "connections",
         pairs: validPairs,
+        colAName: r.colAName || "Column A",
+        colBName: r.colBName || "Column B",
         colA: shuffle(validPairs.map(p => ({ pairId: p.id, word: p.a }))),
         colB: shuffle(validPairs.map(p => ({ pairId: p.id, word: p.b }))),
         matched: [],      // array of pairIds correctly matched
@@ -1728,6 +1730,7 @@ function AssociationsPanel({ aq, turnP, otherP, phase, assocPoints, onAssocPoint
 // ─── Build a Card Game ────────────────────────────────────────────────────────
 function BuildACardGame({ aq, turnP, otherP, phase, onAssign, onAwardPoints, onFinish, onCancel }) {
   const [selected, setSelected] = useState(null);
+  const [imgShown, setImgShown] = useState(false);
   const assigned = aq.assigned || { mana: null, attack: null, health: null, keywords: [] };
   const numbers  = aq.numbers  || [];
   const keywords = aq.keywords || [];
@@ -1758,7 +1761,16 @@ function BuildACardGame({ aq, turnP, otherP, phase, onAssign, onAwardPoints, onF
       </div>
       <div className="ctrl-panel" style={{minWidth:280}}>
         <div style={{fontSize:10,color:"var(--muted)",fontWeight:700,textTransform:"uppercase",letterSpacing:".6px",marginBottom:8}}>🃏 Build-a-Card {phase==="answering"?`— ${turnP?.name}`:""}</div>
-        {aq.imageUrl&&<div style={{marginBottom:10}}><a href={aq.imageUrl} target="_blank" rel="noreferrer" style={{display:"block",textDecoration:"none"}}><img src={aq.imageUrl} alt="card" style={{width:"100%",maxHeight:130,objectFit:"contain",borderRadius:6,cursor:"pointer",display:"block",marginBottom:3}} onError={e=>{e.target.style.display="none";}}/><div style={{textAlign:"center",fontSize:10,color:"var(--gold)"}}>Open full size ↗</div></a><hr className="divider" style={{marginTop:8}}/></div>}
+        {aq.imageUrl&&<div style={{marginBottom:10}}>
+          {!imgShown&&<button onClick={()=>setImgShown(true)} className="ctrl-btn btn-ghost" style={{marginBottom:6,fontSize:11}}>
+            Reveal Image
+          </button>}
+          {imgShown&&<a href={aq.imageUrl} target="_blank" rel="noreferrer" style={{display:"block",textDecoration:"none"}}>
+            <img src={aq.imageUrl} alt="card" style={{width:"100%",maxHeight:130,objectFit:"contain",borderRadius:6,cursor:"pointer",display:"block",marginBottom:3}} onError={e=>{e.target.style.display="none";}}/>
+            <div style={{textAlign:"center",fontSize:10,color:"var(--gold)"}}>Open full size ↗</div>
+          </a>}
+          <hr className="divider" style={{marginTop:8}}/>
+        </div>}
         {phase==="answering"&&<>
           {numbers.length>0&&<div style={{marginBottom:10}}><div style={{fontSize:10,color:"var(--muted)",fontWeight:700,marginBottom:5}}>NUMBERS — click then assign to slot</div><div className="row gap2 wrap">{numbers.map((n,i)=>{const isUsed=usedNumIndices.has(i),isSel=selected?.type==="number"&&selected.idx===i;return <button key={i} onClick={()=>!isUsed&&selectNum(i)} style={{padding:"6px 14px",borderRadius:8,fontWeight:900,fontSize:16,fontFamily:"'Barlow Condensed',sans-serif",background:isUsed?"var(--surf3)":isSel?"var(--gold)":"var(--surf2)",border:`1.5px solid ${isUsed?"var(--dim)":isSel?"var(--gold)":"var(--border)"}`,color:isUsed?"var(--dim)":isSel?"#04091e":"var(--text)",cursor:isUsed?"default":"pointer",opacity:isUsed?0.45:1,textDecoration:isUsed?"line-through":"none"}}>{n}</button>})}</div></div>}
           {keywords.length>0&&<div style={{marginBottom:10}}><div style={{fontSize:10,color:"var(--muted)",fontWeight:700,marginBottom:5}}>KEYWORDS — click then assign</div><div className="row gap2 wrap">{keywords.map((k,i)=>{const isUsed=(assigned.keywords||[]).includes(i),isSel=selected?.type==="keyword"&&selected.idx===i;return <button key={i} onClick={()=>!isUsed&&selectKw(i)} style={{padding:"5px 12px",borderRadius:8,fontWeight:700,fontSize:13,background:isUsed?"var(--surf3)":isSel?"var(--gold)":"var(--surf2)",border:`1.5px solid ${isUsed?"var(--dim)":isSel?"var(--gold)":"var(--border)"}`,color:isUsed?"var(--dim)":isSel?"#04091e":"var(--text)",cursor:isUsed?"default":"pointer",opacity:isUsed?0.45:1}}>{k}</button>})}</div></div>}
@@ -1912,8 +1924,8 @@ function AssociationTreeView({ puzzle, onRevealCell, onRevealCenter }) {
 // ─── Connections Editor ────────────────────────────────────────────────────────
 function ConnectionsEditor({ conn, onChange }) {
   const [ai, setAi] = useState(0);
-  const rounds = conn.rounds || [];
-  const freshConnRound = () => ({ id: uid(), pairCount: 5, pairs: Array.from({length:5},()=>({id:uid(),a:"",b:""})) });
+  const rounds = (conn.rounds || []).map(r => ({ colAName: "", colBName: "", ...r }));
+  const freshConnRound = () => ({ id: uid(), pairCount: 5, colAName: "", colBName: "", pairs: Array.from({length:5},()=>({id:uid(),a:"",b:""})) });
 
   const addRound = () => { onChange({...conn, rounds:[...rounds, freshConnRound()]}); setAi(rounds.length); };
   const removeRound = id => { onChange({...conn, rounds:rounds.filter(r=>r.id!==id)}); setAi(0); };
@@ -1958,9 +1970,19 @@ function ConnectionsEditor({ conn, onChange }) {
               </div>
               <Btn variant="ghost" size="sm" style={{color:"#f87171",marginTop:20}} onClick={()=>removeRound(cur.id)}>🗑 Delete</Btn>
             </div>
+            <div className="row gap2" style={{marginBottom:12}}>
+              <div style={{flex:1}}>
+                <label style={{fontSize:11,color:"var(--muted)",fontWeight:600,display:"block",marginBottom:4}}>Column A name</label>
+                <input type="text" value={cur.colAName||""} onChange={e=>updRound(cur.id,{colAName:e.target.value})} placeholder="Column A" />
+              </div>
+              <div style={{flex:1}}>
+                <label style={{fontSize:11,color:"var(--muted)",fontWeight:600,display:"block",marginBottom:4}}>Column B name</label>
+                <input type="text" value={cur.colBName||""} onChange={e=>updRound(cur.id,{colBName:e.target.value})} placeholder="Column B" />
+              </div>
+            </div>
             <div className="row gap2" style={{marginBottom:8}}>
-              <div style={{flex:1,fontSize:11,color:"var(--muted)",fontWeight:700,textAlign:"center"}}>Column A</div>
-              <div style={{flex:1,fontSize:11,color:"var(--muted)",fontWeight:700,textAlign:"center"}}>Column B (matches A)</div>
+              <div style={{flex:1,fontSize:11,color:"var(--muted)",fontWeight:700,textAlign:"center"}}>{cur.colAName||"Column A"}</div>
+              <div style={{flex:1,fontSize:11,color:"var(--muted)",fontWeight:700,textAlign:"center"}}>{cur.colBName||"Column B"} (matches A)</div>
             </div>
             <div className="stack" style={{gap:8}}>
               {(cur.pairs||[]).map((p,pi)=>(
@@ -1984,7 +2006,7 @@ function ConnectionsGame({ aq, turnP, phase, onUpdateQ, onAwardPoints, onFinish 
   const [ptsInput, setPtsInput] = useState("");
   const [flash, setFlash] = useState(null);
 
-  const { pairs, colA, colB, matched, selectedA } = aq;
+  const { pairs, colA, colB, matched, selectedA, colAName, colBName } = aq;
   const matchedSet = new Set(matched || []);
   const allMatched = matchedSet.size === (pairs||[]).length;
 
@@ -2035,12 +2057,12 @@ function ConnectionsGame({ aq, turnP, phase, onUpdateQ, onAwardPoints, onFinish 
     <div style={{flex:1,display:"flex",overflow:"hidden"}}>
       <div style={{flex:1,padding:20,display:"flex",gap:16,overflow:"auto"}}>
         <div style={{flex:1}}>
-          <div style={{fontSize:11,fontWeight:700,color:"var(--muted)",textTransform:"uppercase",letterSpacing:1,marginBottom:12,textAlign:"center"}}>Column A</div>
+          <div style={{fontSize:11,fontWeight:700,color:"var(--muted)",textTransform:"uppercase",letterSpacing:1,marginBottom:12,textAlign:"center"}}>{colAName||"Column A"}</div>
           {(colA||[]).map(({pairId,word})=>wordBtn(pairId,word,"A",selectedA===pairId,matchedSet.has(pairId),getMatchColor(pairId),flash&&flash.pairId===pairId?flash:null))}
         </div>
         <div style={{width:2,background:"var(--border)",flexShrink:0,borderRadius:2}}/>
         <div style={{flex:1}}>
-          <div style={{fontSize:11,fontWeight:700,color:"var(--muted)",textTransform:"uppercase",letterSpacing:1,marginBottom:12,textAlign:"center"}}>Column B</div>
+          <div style={{fontSize:11,fontWeight:700,color:"var(--muted)",textTransform:"uppercase",letterSpacing:1,marginBottom:12,textAlign:"center"}}>{colBName||"Column B"}</div>
           {(colB||[]).map(({pairId,word})=>wordBtn(pairId,word,"B",false,matchedSet.has(pairId),getMatchColor(pairId),flash&&flash.bPairId===pairId?flash:null))}
         </div>
       </div>
@@ -2050,10 +2072,10 @@ function ConnectionsGame({ aq, turnP, phase, onUpdateQ, onAwardPoints, onFinish 
         {phase==="answering" && <>
           {selectedA ? (
             <div style={{padding:"8px 12px",background:"rgba(245,197,24,.08)",border:"1px solid rgba(245,197,24,.3)",borderRadius:8,marginBottom:12,fontSize:12,color:"var(--gold)",fontWeight:700}}>
-              Selected: {(colA||[]).find(x=>x.pairId===selectedA)?.word} — click Column B
+              Selected: {(colA||[]).find(x=>x.pairId===selectedA)?.word} — click {colBName||"Column B"}
             </div>
           ) : (
-            <div className="muted" style={{fontSize:12,marginBottom:12}}>{allMatched?"All pairs matched!":`${turnP?.name}: click Column A`}</div>
+            <div className="muted" style={{fontSize:12,marginBottom:12}}>{allMatched?"All pairs matched!":`${turnP?.name}: click ${colAName||"Column A"}`}</div>
           )}
           <hr className="divider"/>
           <div style={{fontSize:10,color:"var(--muted)",fontWeight:700,textTransform:"uppercase",letterSpacing:".6px",marginBottom:6}}>Award points</div>
